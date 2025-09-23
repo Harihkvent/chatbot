@@ -123,14 +123,17 @@ if not st.session_state.authenticated:
         password = st.text_input("Password", type="password")
         if st.button("Register"):
             success, msg = register_user(email, password)
-            st.success(msg) if success else st.error(msg)
+            if success:
+                st.success(msg)
+            else:
+                st.error(msg)
+
         if st.button("Login"):
             success, user_or_msg = login_user(email, password)
             if success:
                 st.session_state.authenticated = True
                 st.session_state.user = user_or_msg
                 st.session_state.messages = []  # Reset chat messages
-                st.experimental_rerun = lambda: None  # Dummy to avoid error
             else:
                 st.error(user_or_msg)
 
@@ -146,7 +149,6 @@ else:
         st.session_state.authenticated = False
         st.session_state.user = None
         st.session_state.messages = []
-        st.experimental_rerun = lambda: None  # dummy
 
     # Optional: custom API key
     api_key_input = st.text_input("Custom API Key (optional)", value=user.get("api_key") or "")
