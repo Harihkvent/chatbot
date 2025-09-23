@@ -13,9 +13,7 @@ DEFAULT_API_KEY = os.getenv("KRUTRIM_API_KEY")
 API_URL = "https://cloud.olakrutrim.com/v1/chat/completions"
 
 # ----------------- MongoDB -----------------
-username = quote_plus(os.getenv("MONGO_USER"))
 password = quote_plus(os.getenv("MONGO_PASS"))
-cluster = os.getenv("MONGO_CLUSTER")
 dbname = os.getenv("MONGO_DB")
 
 MONGO_URI = f"mongodb+srv://chatbot:{password}@cluster0.57nirib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
