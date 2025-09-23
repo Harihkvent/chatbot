@@ -7,7 +7,6 @@ import requests
 import bcrypt
 from urllib.parse import quote_plus
 import certifi  # ensures proper SSL certificates
-
 # ----------------- Load environment -----------------
 load_dotenv()
 DEFAULT_API_KEY = os.getenv("KRUTRIM_API_KEY")
