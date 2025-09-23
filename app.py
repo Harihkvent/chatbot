@@ -6,6 +6,7 @@ from dotenv import load_dotenv
 import requests
 import bcrypt
 from urllib.parse import quote_plus
+import certifi  # ensures proper SSL certificates
 
 # ----------------- Load environment -----------------
 load_dotenv()
@@ -13,11 +14,22 @@ DEFAULT_API_KEY = os.getenv("KRUTRIM_API_KEY")
 API_URL = "https://cloud.olakrutrim.com/v1/chat/completions"
 
 # ----------------- MongoDB -----------------
+username = quote_plus("chatbot")  # or use env variable
 password = quote_plus(os.getenv("MONGO_PASS"))
 dbname = os.getenv("MONGO_DB")
-password = quote_plus(password)
-MONGO_URI = f"mongodb+srv://chatbot:{password}@cluster0.57nirib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
-client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
+
+# Use tlsCAFile=certifi.where() to fix SSL handshake in Streamlit Cloud
+MONGO_URI = f"mongodb+srv://{username}:{password}@cluster0.57nirib.mongodb.net/{dbname}?retryWrites=true&w=majority&tls=true"
+client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=10000)
+
+# Test connection
+try:
+    client.admin.command('ping')
+    st.success("MongoDB connected successfully!")
+except Exception as e:
+    st.error(f"MongoDB connection failed: {e}")
+
+# ----------------- Collections -----------------
 db = client[dbname]
 users_col = db.users
 chats_col = db.chats
