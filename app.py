@@ -18,7 +18,7 @@ password = quote_plus(os.getenv("MONGO_PASS"))
 dbname = os.getenv("MONGO_DB")
 
 # Use tlsCAFile=certifi.where() to fix SSL handshake in Streamlit Cloud
-MONGO_URI = f"mongodb+srv://{username}:{password}@cluster0.57nirib.mongodb.net/{dbname}?retryWrites=true&w=majority&tls=true"
+MONGO_URI = f"mongodb+srv://chatbot:{password}@cluster0.57nirib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_URI, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=10000)
 
 # Test connection
