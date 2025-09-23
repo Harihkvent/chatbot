@@ -15,7 +15,7 @@ API_URL = "https://cloud.olakrutrim.com/v1/chat/completions"
 # ----------------- MongoDB -----------------
 password = quote_plus(os.getenv("MONGO_PASS"))
 dbname = os.getenv("MONGO_DB")
-
+password = quote_plus(password)
 MONGO_URI = f"mongodb+srv://chatbot:{password}@cluster0.57nirib.mongodb.net/?retryWrites=true&w=majority&appName=Cluster0"
 client = MongoClient(MONGO_URI, serverSelectionTimeoutMS=10000)
 db = client[dbname]
