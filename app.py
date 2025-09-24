@@ -86,7 +86,7 @@ def can_use_tokens(user, tokens_needed):
         )
         user["tokens_used_today"] = 0
 
-    return user["tokens_used_today"] + tokens_needed <= 2000
+    return user["tokens_used_today"] + tokens_needed <= 1000
 
 def increment_tokens(user, tokens):
     users_col.update_one({"_id": user["_id"]}, {"$inc": {"tokens_used_today": tokens}})
