@@ -169,7 +169,7 @@ else:
     if prompt := st.chat_input("Type your message..."):
         tokens_needed = 512
         if not can_use_tokens(user, tokens_needed) and not user.get("api_key"):
-            st.warning("⚠️ Daily limit reached (2000). Add your own API key to continue.")
+            st.warning("⚠️ Daily limit reached (1000). Add your own API key to continue.")
         else:
             st.session_state.messages.append(("user", prompt))
             st.chat_message("user").markdown(prompt)
