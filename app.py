@@ -6,19 +6,18 @@ from dotenv import load_dotenv
 import requests
 import bcrypt
 from urllib.parse import quote_plus
-import certifi
-from streamlit_cookies_manager import EncryptedCookieManager
-
+import certifi  # ensures proper SSL certificates
 # ----------------- Load environment -----------------
 load_dotenv()
 DEFAULT_API_KEY = os.getenv("KRUTRIM_API_KEY")
 API_URL = "https://cloud.olakrutrim.com/v1/chat/completions"
 
 # ----------------- MongoDB -----------------
-username = quote_plus("chatbot")
+username = quote_plus("chatbot")  # or use env variable
 password = quote_plus(os.getenv("MONGO_PASS"))
 dbname = os.getenv("MONGO_DB")
 
+# Use tlsCAFile=certifi.where() to fix SSL handshake in Streamlit Cloud
 MONGO_URI = (
     f"mongodb+srv://{username}:{password}@cluster0.57nirib.mongodb.net/{dbname}"
     "?retryWrites=true&w=majority&tls=true"
@@ -36,7 +35,6 @@ try:
     print("MongoDB connected!")
 except Exception as e:
     print("MongoDB connection failed:", e)
-
 # ----------------- Collections -----------------
 db = client[dbname]
 users_col = db.users
@@ -72,14 +70,12 @@ def login_user(email, password):
 
 # ----------------- Rate Limiting -----------------
 def can_use_tokens(user, tokens_needed):
-    # Skip rate limit if user has own API key
-    if user.get("api_key"):
-        return True  
-
     last_reset = user.get("last_reset")
+
     if not isinstance(last_reset, datetime):
         last_reset = datetime.now(timezone.utc)
     else:
+        # If stored as naive, make it UTC aware
         if last_reset.tzinfo is None:
             last_reset = last_reset.replace(tzinfo=timezone.utc)
 
@@ -93,9 +89,6 @@ def can_use_tokens(user, tokens_needed):
     return user["tokens_used_today"] + tokens_needed <= 1000
 
 def increment_tokens(user, tokens):
-    # Skip increment if user has own key
-    if user.get("api_key"):
-        return
     users_col.update_one({"_id": user["_id"]}, {"$inc": {"tokens_used_today": tokens}})
 
 # ----------------- Krutrim Chat -----------------
@@ -112,28 +105,13 @@ def chat_with_krutrim(messages, api_key=None):
 # ----------------- Streamlit UI -----------------
 st.set_page_config(page_title="Krutrim Chatbot", page_icon="🤖", layout="centered")
 
-# Cookies for persistent login
-cookies = EncryptedCookieManager(
-    prefix="krutrim_chat_",
-    password=os.getenv("COOKIE_SECRET", "supersecret"),
-)
-if not cookies.ready():
-    st.stop()
-
-# ----------------- Session State -----------------
+# Initialize session state
 if "authenticated" not in st.session_state:
     st.session_state.authenticated = False
 if "user" not in st.session_state:
     st.session_state.user = None
 if "messages" not in st.session_state:
     st.session_state.messages = []
-
-# Auto-login if cookie exists
-if not st.session_state.authenticated and "user_email" in cookies:
-    saved_user = users_col.find_one({"email": cookies["user_email"]})
-    if saved_user:
-        st.session_state.authenticated = True
-        st.session_state.user = saved_user
 
 # ----------------- Login / Registration -----------------
 if not st.session_state.authenticated:
@@ -155,9 +133,7 @@ if not st.session_state.authenticated:
             if success:
                 st.session_state.authenticated = True
                 st.session_state.user = user_or_msg
-                st.session_state.messages = []
-                cookies["user_email"] = user_or_msg["email"]
-                cookies.save()
+                st.session_state.messages = []  # Reset chat messages
             else:
                 st.error(user_or_msg)
 
@@ -173,49 +149,39 @@ else:
         st.session_state.authenticated = False
         st.session_state.user = None
         st.session_state.messages = []
-        if "user_email" in cookies:
-            del cookies["user_email"]
-            cookies.save()
 
-    # -------- API Key Handling --------
-    st.subheader("🔑 API Key Settings")
-    if not user.get("api_key"):
-        api_key_input = st.text_input("Enter your API Key", type="password")
-        if st.button("Save API Key") and api_key_input.strip():
-            users_col.update_one({"_id": user["_id"]}, {"$set": {"api_key": api_key_input.strip()}})
-            user["api_key"] = api_key_input.strip()
-            st.success("✅ API Key saved securely")
-    else:
-        st.info("✅ API Key already saved")
-        if st.button("Delete API Key"):
-            users_col.update_one({"_id": user["_id"]}, {"$set": {"api_key": None}})
-            user["api_key"] = None
-            st.success("❌ API Key deleted")
+    # Optional: custom API key
+    api_key_input = st.text_input("Custom API Key (optional)", value=user.get("api_key") or "")
+    if api_key_input != user.get("api_key"):
+        users_col.update_one({"_id": user["_id"]}, {"$set": {"api_key": api_key_input}})
+        user["api_key"] = api_key_input
 
-    # -------- Load chat history --------
+    # Load chat history
     if not st.session_state.messages:
         history = list(chats_col.find({"user_id": user["_id"]}).sort("timestamp", 1))
         st.session_state.messages = [(m["role"], m["content"]) for m in history]
 
-    # -------- Display chat --------
+    # Display chat
     for role, text in st.session_state.messages:
         st.chat_message(role).markdown(text)
 
-    # -------- Chat input --------
+    # Chat input
     if prompt := st.chat_input("Type your message..."):
         tokens_needed = 512
-        if not can_use_tokens(user, tokens_needed):
+        if not can_use_tokens(user, tokens_needed) and not user.get("api_key"):
             st.warning("⚠️ Daily limit reached (1000). Add your own API key to continue.")
         else:
             st.session_state.messages.append(("user", prompt))
             st.chat_message("user").markdown(prompt)
 
+            # Maintain context
             messages_payload = [{"role": r, "content": c} for r, c in st.session_state.messages]
             reply, used_tokens = chat_with_krutrim(messages_payload, user.get("api_key"))
 
             st.session_state.messages.append(("assistant", reply))
             st.chat_message("assistant").markdown(reply)
 
+            # Save chat
             chats_col.insert_many([
                 {"user_id": user["_id"], "role": "user", "content": prompt, "timestamp": datetime.now(timezone.utc)},
                 {"user_id": user["_id"], "role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc)}
