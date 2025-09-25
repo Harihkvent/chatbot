@@ -85,7 +85,7 @@ def can_use_tokens(user, tokens_needed):
         )
         user["tokens_used_today"] = 0
 
-    return user["tokens_used_today"] + tokens_needed <= 2000
+    return user["tokens_used_today"] + tokens_needed <= 1000
 
 def increment_tokens(user, tokens):
     users_col.update_one({"_id": user["_id"]}, {"$inc": {"tokens_used_today": tokens}})
@@ -287,7 +287,7 @@ else:
     if prompt:
         tokens_needed = 512
         if not can_use_tokens(user, tokens_needed) and not user.get("api_key"):
-            st.warning("⚠️ Daily limit reached (2000). Add your own API key to continue.")
+            st.warning("⚠️ Daily limit reached (1000). Add your own API key to continue.")
         else:
             st.session_state.messages.append(("user", prompt))
             st.markdown(f'<div class="chat-bubble-user">🧑‍💻 {prompt}</div>', unsafe_allow_html=True)
