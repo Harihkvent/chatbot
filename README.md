@@ -3,6 +3,13 @@
 A modern, ChatGPT-like chatbot web app built with Streamlit, MongoDB, and Krutrim API.  
 It supports user authentication, token limits, custom API keys, metrics, and logging.
 
+---
+
+**Access the bot online:**  
+👉 [https://yahanar.streamlit.app/](https://yahanar.streamlit.app/)
+
+---
+
 ## Features
 
 - **User Authentication:** Register and login securely with hashed passwords.
