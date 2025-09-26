@@ -1,62 +1,88 @@
-streamlit>=1.49.0t>=1.49.0m Chatbot
-pymongo>=4.7.22
-python-dotenv>=1.0.1tenv>=1.0.1-like chatbot web app built with Streamlit and MongoDB.
-bcrypt>=4.1.2=4.1.2
-requests>=2.32.3s>=2.32.3ures
+# Krutrim Chatbot
 
-certifi>=2024.6.2
-certifi>=2024.6.2
-- User registration and login
-- Secure password hashing
-- Token usage limit per days
-- Custom API key support (hidden input, save/delete)
-- Fixed top navigation bar
-- Sidebar for profile and settingsnt**
-- Scroll-to-bottom button- Secure API key management using `.env` file
-- Refresh chat without logging out
+A modern, ChatGPT-like chatbot web app built with Streamlit, MongoDB, and Krutrim API.  
+It supports user authentication, token limits, custom API keys, metrics, and logging.
+
+## Features
+
+- **User Authentication:** Register and login securely with hashed passwords.
+- **Chat Interface:** ChatGPT-style UI using Streamlit components.
+- **Token Usage:** Daily token limit per user, shown in the sidebar.
+- **Custom API Key:** Users can save or delete their own API key (hidden input).
+- **Profile & Settings:** Sidebar shows user info, token usage, and API key management.
+- **Logging:** All major actions are logged for debugging and monitoring.
+- **Metrics:** Prometheus metrics for requests, logins, registrations, errors, and chat latency.
+- **MongoDB Storage:** Stores users and chat history.
+- **Easy Refresh:** Refresh chat history without logging out.
+- **Dark Mode:** Clean, modern look using Streamlit’s built-in theming.
+
+## Getting Started
+
+### 1. Clone the repository
+
+```sh
+git clone <your-repo-url>
+cd chatbot
+```
+
+### 2. Create and activate a virtual environment
+
+```sh
+python -m venv venv
+venv\Scripts\activate
+```
+
+### 3. Install dependencies
+
+```sh
+pip install -r requirements.txt
+```
+
+### 4. Configure secrets
+
+Edit `.streamlit/secrets.toml` with your API keys and MongoDB credentials:
+
+```toml
+KRUTRIM_API_KEY="your_krutrim_api_key"
+MONGO_USER="your_mongo_user"
+MONGO_PASS="your_mongo_password"
+MONGO_CLUSTER="your_mongo_cluster_url"
+MONGO_DB="your_db_name"
+```
+
+### 5. Run the app
+
+```sh
+streamlit run app.py
+```
+
+The Prometheus metrics server will start on port 8000 by default.
+
+## Usage
+
+- Register or login with your email and password.
+- Start chatting with the bot.
+- View your token usage and profile in the sidebar.
+- Save or delete your custom API key.
+- Refresh chat history with the refresh button.
+- Monitor metrics at `http://localhost:8000/metrics`.
+
+## Contributing
+
+Contributions are welcome!  
+If you have ideas, bug fixes, or improvements, please:
+
+1. Fork the repository.
+2. Create a new branch for your feature or fix.
+3. Submit a pull request with a clear description.
+
+Please follow [PEP8](https://peps.python.org/pep-0008/) coding style and add logging for new features.
+
+## License
+
+MIT
+
 ---
-## Setup
-## 🛠️ Technologies Used
-1. **Clone the repository**  
-   ```
-   git clone <your-repo-url>
-   cd chatbot
-   ```rg/project/python-dotenv/) – Environment variables
-- Krutrim API – AI model backend
-2. **Create and activate a virtual environment**  
-   ```---
-   python -m venv venv
-   venv\Scripts\activate## ⚡ Installation & Setup
-   ```
-1. **Clone the repository**
-3. **Install dependencies**  
-   ```
-   pip install -r requirements.txthttps://github.com/Harihkvent/chatbot.git
-   ```cd chatbot
 
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-
-MIT## License- Refresh the chat page without logging out.- Use the scroll-to-bottom button for long chats.- Optionally, save or delete your custom API key.- View your token usage and profile in the sidebar.- Start chatting with the bot.- Register or login with your email and password.## Usage   ```   streamlit run app.py   ```5. **Run the app**     ```   MONGO_DB=your_mongodb_dbname   MONGO_PASS=your_mongodb_password   KRUTRIM_API_KEY=your_krutrim_api_key   ```   Create a `.env` file in the project root with:4. **Configure environment variables**  
+**Contact:**  
+For questions or support, open an issue or contact the maintainer.
