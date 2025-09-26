@@ -7,6 +7,39 @@ import requests
 import bcrypt
 from urllib.parse import quote_plus
 import certifi  # ensures proper SSL certificates
+import logging
+from prometheus_client import Counter, Histogram, start_http_server, REGISTRY
+
+# ----------------- Logging Setup -----------------
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s %(levelname)s %(message)s",
+    handlers=[logging.StreamHandler()]
+)
+logger = logging.getLogger("chatbot")
+
+def get_metric(name, metric_type, *args, **kwargs):
+    # Helper to get or create a metric
+    if name in REGISTRY._names_to_collectors:
+        return REGISTRY._names_to_collectors[name]
+    else:
+        return metric_type(name, *args, **kwargs)
+
+# ----------------- Prometheus Metrics -----------------
+REQUEST_COUNT = get_metric('chatbot_requests_total', Counter, 'Total requests')
+LOGIN_COUNT = get_metric('chatbot_logins_total', Counter, 'Total logins')
+REGISTER_COUNT = get_metric('chatbot_registers_total', Counter, 'Total registrations')
+CHAT_COUNT = get_metric('chatbot_chats_total', Counter, 'Total chat messages')
+ERROR_COUNT = get_metric('chatbot_errors_total', Counter, 'Total errors')
+CHAT_LATENCY = get_metric('chatbot_chat_latency_seconds', Histogram, 'Chat response latency')
+
+if not hasattr(st, "prometheus_metrics_server_started"):
+    try:
+        start_http_server(8000)
+        logger.info("Prometheus metrics server started on port 8000")
+    except Exception as e:
+        logger.warning(f"Prometheus metrics server could not start: {e}")
+    st.prometheus_metrics_server_started = True
 
 # ----------------- Load environment -----------------
 load_dotenv()
@@ -23,6 +56,7 @@ MONGO_URI = (
     "?retryWrites=true&w=majority&tls=true"
 )
 
+logger.info("Connecting to MongoDB...")
 client = MongoClient(
     MONGO_URI,
     tlsCAFile=certifi.where(),
@@ -32,9 +66,9 @@ client = MongoClient(
 # Test connection
 try:
     client.admin.command("ping")
-    print("MongoDB connected!")
+    logger.info("MongoDB connected!")
 except Exception as e:
-    print("MongoDB connection failed:", e)
+    logger.error(f"MongoDB connection failed: {e}")
 # ----------------- Collections -----------------
 db = client[dbname]
 users_col = db.users
@@ -42,13 +76,18 @@ chats_col = db.chats
 
 # ----------------- Authentication -----------------
 def hash_password(password):
+    logger.info("Hashing password")
     return bcrypt.hashpw(password.encode(), bcrypt.gensalt())
 
 def check_password(password, hashed):
+    logger.info("Checking password")
     return bcrypt.checkpw(password.encode(), hashed)
 
 def register_user(email, password):
+    logger.info(f"Registering user: {email}")
+    REGISTER_COUNT.inc()
     if users_col.find_one({"email": email}):
+        logger.warning(f"User already exists: {email}")
         return False, "User already exists!"
     hashed = hash_password(password)
     users_col.insert_one({
@@ -58,18 +97,27 @@ def register_user(email, password):
         "tokens_used_today": 0,
         "last_reset": datetime.now(timezone.utc)
     })
+    logger.info(f"User registered: {email}")
     return True, "Registered successfully!"
 
 def login_user(email, password):
+    logger.info(f"Login attempt: {email}")
     user = users_col.find_one({"email": email})
     if not user:
+        logger.warning(f"User not found: {email}")
+        ERROR_COUNT.inc()
         return False, "User not found."
     if check_password(password, user["password_hash"]):
+        LOGIN_COUNT.inc()
+        logger.info(f"Login successful: {email}")
         return True, user
+    logger.warning(f"Incorrect password for user: {email}")
+    ERROR_COUNT.inc()
     return False, "Incorrect password."
 
 # ----------------- Rate Limiting -----------------
 def can_use_tokens(user, tokens_needed):
+    logger.info(f"Checking token usage for user: {user['email']}")
     last_reset = user.get("last_reset")
 
     if not isinstance(last_reset, datetime):
@@ -79,48 +127,67 @@ def can_use_tokens(user, tokens_needed):
             last_reset = last_reset.replace(tzinfo=timezone.utc)
 
     if datetime.now(timezone.utc) - last_reset > timedelta(days=1):
+        logger.info(f"Resetting tokens for user: {user['email']}")
         users_col.update_one(
             {"_id": user["_id"]},
             {"$set": {"tokens_used_today": 0, "last_reset": datetime.now(timezone.utc)}}
         )
         user["tokens_used_today"] = 0
 
-    return user["tokens_used_today"] + tokens_needed <= 1000
+    allowed = user["tokens_used_today"] + tokens_needed <= 1000
+    logger.info(f"Token allowed: {allowed} for user: {user['email']}")
+    return allowed
 
 def increment_tokens(user, tokens):
+    logger.info(f"Incrementing tokens by {tokens} for user: {user['email']}")
     users_col.update_one({"_id": user["_id"]}, {"$inc": {"tokens_used_today": tokens}})
 
 # ----------------- Krutrim Chat -----------------
 def chat_with_krutrim(messages, api_key=None):
+    logger.info("Sending chat request to Krutrim API")
     key_to_use = api_key if api_key else DEFAULT_API_KEY
     headers = {"Authorization": f"Bearer {key_to_use}", "Content-Type": "application/json"}
     payload = {"model": "Krutrim-spectre-v2", "messages": messages, "max_tokens": 512, "temperature": 0.7}
-    resp = requests.post(API_URL, headers=headers, json=payload)
-    if resp.status_code == 200:
-        data = resp.json()
-        return data["choices"][0]["message"]["content"], payload["max_tokens"]
-    return f"❌ Error: {resp.status_code}, {resp.text}", 0
+    try:
+        with CHAT_LATENCY.time():
+            resp = requests.post(API_URL, headers=headers, json=payload)
+        REQUEST_COUNT.inc()
+        if resp.status_code == 200:
+            data = resp.json()
+            logger.info("Received response from Krutrim API")
+            return data["choices"][0]["message"]["content"], payload["max_tokens"]
+        logger.error(f"Krutrim API error: {resp.status_code}, {resp.text}")
+        ERROR_COUNT.inc()
+        return f"❌ Error: {resp.status_code}, {resp.text}", 0
+    except Exception as e:
+        logger.error(f"Exception during chat API call: {e}")
+        ERROR_COUNT.inc()
+        return f"❌ Exception: {str(e)}", 0
 
 # ----------------- Streamlit UI -----------------
 st.set_page_config(page_title="Krutrim Chatbot", page_icon="🤖", layout="centered")
 
 # Initialize session state variables
 if "authenticated" not in st.session_state:
+    logger.info("Initializing session state: authenticated")
     st.session_state.authenticated = False
 if "user_email" not in st.session_state:
+    logger.info("Initializing session state: user_email")
     st.session_state.user_email = None
 if "user" not in st.session_state:
+    logger.info("Initializing session state: user")
     st.session_state.user = None
 if "messages" not in st.session_state:
+    logger.info("Initializing session state: messages")
     st.session_state.messages = []
 
-# Fixed Navigation Bar
 st.markdown("""
     <style>
+    /* Navbar */
     .navbar {
         position: fixed;
         top: 0; left: 0; right: 0;
-        background: #222;
+        background: #18181b;
         color: #fff;
         padding: 0.7rem 2rem;
         z-index: 1000;
@@ -140,8 +207,121 @@ st.markdown("""
         margin-left: 2rem;
         font-size: 1rem;
     }
-    .stApp { padding-top: 60px; }
+    .stApp { padding-top: 60px; background: #101014; }
+    /* Sidebar */
+    section[data-testid="stSidebar"] {
+        background: #18181b;
+        color: #fff;
+    }
+    /* Sidebar buttons */
+    .stButton>button {
+        background: #23272f;
+        color: #fff;
+        border-radius: 8px;
+        border: none;
+        margin: 4px 0;
+        
+        padding: 0.5rem 1.2rem;
+        font-size: 1rem;
+        transition: background 0.2s;
+    }
+    .stButton>button:hover {
+        background: #2563eb;
+        color: #fff;
+    }
+    /* API key input */
+    input[type="password"] {
+        background: #23272f;
+        color: #fff;
+        border-radius: 8px;
+        border: 1px solid #444;
+        padding: 0.5rem;
+        font-size: 1rem;
+    }
+    /* Chat container */
+    .chat-container {
+        max-width: 700px;
+        margin: 0 auto;
+        padding: 2rem 0 7rem 0;
+        min-height: 70vh;
+    }
+    /* Chat bubbles */
+    .chat-bubble-user {
+        background: #2563eb;
+        color: #fff;
+        border-radius: 16px 16px 0 16px;
+        padding: 14px 20px;
+        margin-bottom: 12px;
+        margin-left: 120px;
+        margin-right: 0;
+        text-align: left;
+        width: fit-content;
+        max-width: 80%;
+        box-shadow: 0 2px 8px rgba(37,99,235,0.08);
+        font-size: 1.08rem;
+    }
+    .chat-bubble-bot {
+        background: #23272f;
+        color: #fff;
+        border-radius: 16px 16px 16px 0;
+        padding: 14px 20px;
+        margin-bottom: 12px;
+        margin-right: 120px;
+        margin-left: 0;
+        text-align: left;
+        width: fit-content;
+        max-width: 80%;
+        box-shadow: 0 2px 8px rgba(0,0,0,0.12);
+        font-size: 1.08rem;
+    }
+    /* Chat input box */
+    .stChatInput>div>input {
+        border-radius: 12px;
+        border: 1px solid #444;
+        background: #18181b;
+        color: #fff;
+        font-size: 1.1rem;
+        padding: 0.7rem;
+    }
+    /* Scroll button */
+    .scroll-btn {
+        position:fixed;
+        bottom:30px;
+        right:30px;
+        z-index:999;
+        background:#2563eb;
+        color:#fff;
+        border:none;
+        padding:10px 18px;
+        border-radius:8px;
+        box-shadow:0 2px 8px rgba(0,0,0,0.15);
+        cursor:pointer;
+        font-size:1rem;
+        transition: background 0.2s;
+    }
+    .scroll-btn:hover {
+        background: #1e40af;
+    }
+    /* Refresh button */
+    .refresh-btn {
+        background: #23272f;
+        color: #fff;
+        border-radius: 8px;
+        border: 2px solid #2563eb;
+        padding: 0.5rem 1.2rem;
+        font-size: 1rem;
+        margin: 1rem auto;
+        display: block;
+        transition: background 0.2s;
+    }
+    .refresh-btn:hover {
+        background: #2563eb;
+        color: #fff;
+    }
     </style>
+""", unsafe_allow_html=True)
+
+st.markdown("""
     <div class="navbar">
         <span class="navbar-title">🤖 Krutrim Chatbot</span>
         <span>
@@ -153,19 +333,20 @@ st.markdown("""
 
 # ----------------- Login / Registration -----------------
 if not st.session_state.authenticated:
-    st.markdown("## Welcome to Krutrim Chatbot")
-    st.markdown("#### Please login or register to continue")
+    logger.info("Rendering login/register UI")
+    st.title("Krutrim Chatbot")
+    st.subheader("Login or Register to continue")
     choice = st.radio("Choose an option:", ["Login", "Register"], horizontal=True)
 
     with st.form("login_register_form"):
-        st.markdown("### " + ("Login" if choice == "Login" else "Register"))
-        email = st.text_input("Email", placeholder="Enter your email")
-        password = st.text_input("Password", type="password", placeholder="Enter your password")
-        col1, col2 = st.columns([1,1])
-        login_btn = col1.form_submit_button("Login", use_container_width=True)
-        register_btn = col2.form_submit_button("Register", use_container_width=True)
+        email = st.text_input("Email")
+        password = st.text_input("Password", type="password")
+        col1, col2 = st.columns(2)
+        login_btn = col1.form_submit_button("Login")
+        register_btn = col2.form_submit_button("Register")
 
         if choice == "Register" and register_btn:
+            logger.info("Register button clicked")
             success, msg = register_user(email, password)
             if success:
                 st.success(msg)
@@ -173,131 +354,85 @@ if not st.session_state.authenticated:
                 st.error(msg)
 
         if choice == "Login" and login_btn:
+            logger.info("Login button clicked")
             success, user_or_msg = login_user(email, password)
             if success:
                 st.session_state.authenticated = True
                 st.session_state.user_email = email
                 st.session_state.user = user_or_msg
                 st.session_state.messages = []
+                logger.info(f"User logged in: {email}")
                 st.rerun()
             else:
                 st.error(user_or_msg)
 
-    st.markdown("""
-        <style>
-        .stTextInput>div>input { border-radius: 8px; border: 1px solid #aaa; }
-        .stPasswordInput>div>input { border-radius: 8px; border: 1px solid #aaa; }
-        .stButton>button { border-radius: 8px; background: #222; color: #fff; }
-        </style>
-    """, unsafe_allow_html=True)
-
-# ----------------- Chat interface -----------------
 else:
     user = st.session_state.user
-    st.markdown('<a name="chat"></a>', unsafe_allow_html=True)
+    logger.info(f"Rendering chat UI for user: {user['email']}")
 
     # Sidebar for profile/settings
     with st.sidebar:
-        st.markdown("### Profile & Settings")
+        st.header("Profile & Settings")
         st.write(f"**Email:** {user['email']}")
         st.write(f"**Tokens used today:** {user.get('tokens_used_today', 0)} / 2000")
-        
-        # Hide API key input, add Save/Delete
-        api_key_input = st.text_input(
-            "Custom API Key (optional)", 
-            value=user.get("api_key") or "", 
-            type="password", 
-            key="api_key_input"
-        )
-        col_api1, col_api2 = st.columns([1, 1])
+        api_key_input = st.text_input("Custom API Key (optional)", value=user.get("api_key") or "", type="password")
+        col_api1, col_api2 = st.columns(2)
         if col_api1.button("Save API Key"):
+            logger.info("Save API Key button clicked")
             users_col.update_one({"_id": user["_id"]}, {"$set": {"api_key": api_key_input}})
             user["api_key"] = api_key_input
             st.success("API Key saved!")
         if col_api2.button("Delete API Key"):
+            logger.info("Delete API Key button clicked")
             users_col.update_one({"_id": user["_id"]}, {"$set": {"api_key": None}})
             user["api_key"] = None
             st.success("API Key deleted!")
-
-        if st.button("Logout", key="logout_btn"):
+        st.divider()
+        if st.button("Logout"):
+            logger.info(f"User logged out: {user['email']}")
             st.session_state.authenticated = False
             st.session_state.user_email = None
             st.session_state.user = None
             st.session_state.messages = []
             st.rerun()
 
-    st.markdown("""
-        <style>
-        .chat-container {
-            max-width: 700px;
-            margin: 0 auto;
-            padding: 1.5rem 0 6rem 0;
-        }
-        .chat-bubble-user {
-            background: #222;
-            color: #fff;
-            border-radius: 12px;
-            padding: 12px 18px;
-            margin-bottom: 10px;
-            margin-left: 80px;
-            margin-right: 0;
-            text-align: left;
-            width: fit-content;
-            max-width: 80%;
-        }
-        .chat-bubble-bot {
-            background: #f3f3f3;
-            color: #222;
-            border-radius: 12px;
-            padding: 12px 18px;
-            margin-bottom: 10px;
-            margin-right: 80px;
-            margin-left: 0;
-            text-align: left;
-            width: fit-content;
-            max-width: 80%;
-        }
-        .chat-input-box input {
-            border-radius: 8px;
-            border: 1px solid #aaa;
-            padding: 10px;
-            font-size: 1.1rem;
-        }
-        .stApp { background: #fafbfc; }
-        </style>
-    """, unsafe_allow_html=True)
+    st.title("🤖 Krutrim Chatbot")
+    st.caption("ChatGPT-like experience. Your messages are private.")
 
-    st.markdown('<div class="chat-container">', unsafe_allow_html=True)
+    # Show chat history
+    logger.info("Rendering chat history")
     for role, text in st.session_state.messages:
-        if role == "user":
-            st.markdown(f'<div class="chat-bubble-user">🧑‍💻 {text}</div>', unsafe_allow_html=True)
-        else:
-            st.markdown(f'<div class="chat-bubble-bot">🤖 {text}</div>', unsafe_allow_html=True)
-    st.markdown('</div>', unsafe_allow_html=True)
+        with st.chat_message(role):
+            st.write(text)
 
-    # Scroll to bottom button using HTML/JS
-    st.markdown("""
-        <button onclick="window.scrollTo(0, document.body.scrollHeight);" style="position:fixed;bottom:30px;right:30px;z-index:999;background:#222;color:#fff;border:none;padding:10px 18px;border-radius:8px;box-shadow:0 2px 8px rgba(0,0,0,0.15);cursor:pointer;">
-            ⬇️ Scroll to Bottom
-        </button>
-        """, unsafe_allow_html=True)
+    # Refresh chat button
+    if st.button("🔄 Refresh Chat"):
+        logger.info("Refresh Chat button clicked")
+        user = users_col.find_one({"_id": user["_id"]})
+        st.session_state.user = user
+        st.rerun()
 
     # Chat input
     prompt = st.chat_input("Type your message...")
     if prompt:
+        logger.info(f"User sent message: {prompt}")
         tokens_needed = 512
         if not can_use_tokens(user, tokens_needed) and not user.get("api_key"):
-            st.warning("⚠️ Daily limit reached (1000). Add your own API key to continue.")
+            logger.warning("Token limit reached for user")
+            st.warning("⚠️ Daily limit reached (2000). Add your own API key to continue.")
         else:
             st.session_state.messages.append(("user", prompt))
-            st.markdown(f'<div class="chat-bubble-user">🧑‍💻 {prompt}</div>', unsafe_allow_html=True)
+            with st.chat_message("user"):
+                st.write(prompt)
 
             messages_payload = [{"role": r, "content": c} for r, c in st.session_state.messages]
             reply, used_tokens = chat_with_krutrim(messages_payload, user.get("api_key"))
 
             st.session_state.messages.append(("assistant", reply))
-            st.markdown(f'<div class="chat-bubble-bot">🤖 {reply}</div>', unsafe_allow_html=True)
+            with st.chat_message("assistant"):
+                st.write(reply)
 
+            logger.info("Saving chat messages to database")
             chats_col.insert_many([
                 {"user_id": user["_id"], "role": "user", "content": prompt, "timestamp": datetime.now(timezone.utc)},
                 {"user_id": user["_id"], "role": "assistant", "content": reply, "timestamp": datetime.now(timezone.utc)}
@@ -306,9 +441,5 @@ else:
             increment_tokens(user, used_tokens)
             user = users_col.find_one({"_id": user["_id"]})
             st.session_state.user = user
+            CHAT_COUNT.inc()
             st.rerun()
-
-    if st.button("🔄 Refresh Chat", key="refresh_chat_btn"):
-        user = users_col.find_one({"_id": user["_id"]})
-        st.session_state.user = user
-        st.rerun()
