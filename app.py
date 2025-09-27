@@ -134,7 +134,7 @@ def can_use_tokens(user, tokens_needed):
         )
         user["tokens_used_today"] = 0
 
-    allowed = user["tokens_used_today"] + tokens_needed <= 1000
+    allowed = user["tokens_used_today"] + tokens_needed <= 2000
     logger.info(f"Token allowed: {allowed} for user: {user['email']}")
     return allowed
 
@@ -396,7 +396,7 @@ else:
             st.session_state.messages = []
             st.rerun()
 
-    st.title("🤖 Krutrim Chatbot")
+    st.title("🤖 YAHANAR Chatbot")
     st.caption("ChatGPT-like experience. Your messages are private.")
 
     # Show chat history
