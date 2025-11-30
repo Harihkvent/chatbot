@@ -189,30 +189,28 @@ def create_or_update_google_user(user_info):
     return user
 
 # ----------------- MongoDB -----------------
-username = quote_plus("chatbot")  # or use env variable
-password = quote_plus(os.getenv("MONGO_PASS"))
-dbname = os.getenv("MONGO_DB")
+@st.cache_resource
+def get_mongo_client():
+    """Initializes and returns a cached MongoDB client."""
+    logger.info("Connecting to MongoDB...")
+    username = quote_plus("chatbot")
+    password = quote_plus(os.getenv("MONGO_PASS"))
+    dbname = os.getenv("MONGO_DB")
+    mongo_uri = f"mongodb+srv://{username}:{password}@cluster0.57nirib.mongodb.net/{dbname}?retryWrites=true&w=majority&tls=true"
+    
+    client = MongoClient(mongo_uri, tlsCAFile=certifi.where(), serverSelectionTimeoutMS=10000)
+    
+    # Test connection
+    try:
+        client.admin.command("ping")
+        logger.info("MongoDB connected!")
+    except Exception as e:
+        logger.error(f"MongoDB connection failed: {e}")
+        # The app will likely fail later, but we log the initial error.
+    return client
 
-MONGO_URI = (
-    f"mongodb+srv://{username}:{password}@cluster0.57nirib.mongodb.net/{dbname}"
-    "?retryWrites=true&w=majority&tls=true"
-)
-
-logger.info("Connecting to MongoDB...")
-client = MongoClient(
-    MONGO_URI,
-    tlsCAFile=certifi.where(),
-    serverSelectionTimeoutMS=10000
-)
-
-# Test connection
-try:
-    client.admin.command("ping")
-    logger.info("MongoDB connected!")
-except Exception as e:
-    logger.error(f"MongoDB connection failed: {e}")
-# ----------------- Collections -----------------
-db = client[dbname]
+client = get_mongo_client()
+db = client[os.getenv("MONGO_DB")]
 users_col = db.users
 chats_col = db.chats
 
@@ -251,9 +249,18 @@ def login_user(email, password):
         logger.warning(f"User not found: {email}")
         ERROR_COUNT.inc()
         return False, "User not found."
+    
+    # Check if user was created via Google OAuth (no password hash)
+    if not user.get("password_hash"):
+        logger.warning(f"User {email} was created via Google OAuth, cannot login with password")
+        ERROR_COUNT.inc()
+        return False, "This account was created with Google. Please use 'Sign in with Google'."
+    
     if check_password(password, user["password_hash"]):
         LOGIN_COUNT.inc()
         logger.info(f"Login successful: {email}")
+        # Update last login time
+        users_col.update_one({"_id": user["_id"]}, {"$set": {"last_login": datetime.now(timezone.utc)}})
         return True, user
     logger.warning(f"Incorrect password for user: {email}")
     ERROR_COUNT.inc()
@@ -533,16 +540,23 @@ if not st.session_state.authenticated:
         else:
             st.error("Failed to generate Google OAuth URL. Please check your configuration.")
 
-        if choice == "Register" and register_btn:
-            logger.info("Register button clicked")
+    # Handle email/password authentication
+    if choice == "Register" and register_btn:
+        logger.info("Register button clicked")
+        if not email or not password:
+            st.error("Please enter both email and password.")
+        else:
             success, msg = register_user(email, password)
             if success:
                 st.success(msg)
             else:
                 st.error(msg)
 
-        if choice == "Login" and login_btn:
-            logger.info("Login button clicked")
+    if choice == "Login" and login_btn:
+        logger.info("Login button clicked")
+        if not email or not password:
+            st.error("Please enter both email and password.")
+        else:
             success, user_or_msg = login_user(email, password)
             if success:
                 st.session_state.authenticated = True
