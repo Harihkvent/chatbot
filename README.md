@@ -12,16 +12,18 @@ It supports user authentication, token limits, custom API keys, metrics, and log
 
 ## Features
 
-- **User Authentication:** Register and login securely with hashed passwords.
+- **User Authentication:** Register and login securely with hashed passwords or Google OAuth.
+- **Google Sign-In:** One-click authentication with Google accounts.
 - **Chat Interface:** ChatGPT-style UI using Streamlit components.
 - **Token Usage:** Daily token limit per user, shown in the sidebar.
 - **Custom API Key:** Users can save or delete their own API key (hidden input).
-- **Profile & Settings:** Sidebar shows user info, token usage, and API key management.
+- **Profile & Settings:** Sidebar shows user info, profile picture, token usage, and API key management.
+- **User Database:** Stores user profiles with Google profile information (name, picture, email).
 - **Logging:** All major actions are logged for debugging and monitoring.
 - **Metrics:** Prometheus metrics for requests, logins, registrations, errors, and chat latency.
 - **MongoDB Storage:** Stores users and chat history.
 - **Easy Refresh:** Refresh chat history without logging out.
-- **Dark Mode:** Clean, modern look using Streamlit’s built-in theming.
+- **Dark Mode:** Clean, modern look using Streamlit's built-in theming.
 
 ## Getting Started
 
@@ -45,17 +47,25 @@ venv\Scripts\activate
 pip install -r requirements.txt
 ```
 
-### 4. Configure secrets
+### 4. Configure environment variables
 
-Edit `.streamlit/secrets.toml` with your API keys and MongoDB credentials:
+Create a `.env` file in the project root with your API keys and credentials:
 
-```toml
-KRUTRIM_API_KEY="your_krutrim_api_key"
-MONGO_USER="your_mongo_user"
-MONGO_PASS="your_mongo_password"
-MONGO_CLUSTER="your_mongo_cluster_url"
-MONGO_DB="your_db_name"
+```env
+# Krutrim API Configuration
+KRUTRIM_API_KEY=your_krutrim_api_key_here
+
+# MongoDB Configuration
+MONGO_PASS=your_mongodb_password_here
+MONGO_DB=your_database_name_here
+
+# Google OAuth Configuration (for Google Sign-In)
+GOOGLE_CLIENT_ID=your_google_client_id_here
+GOOGLE_CLIENT_SECRET=your_google_client_secret_here
+OAUTH_REDIRECT_URI=http://localhost:8501
 ```
+
+**For Google Sign-In setup, see [GOOGLE_OAUTH_SETUP.md](GOOGLE_OAUTH_SETUP.md)**
 
 ### 5. Run the app
 
@@ -93,3 +103,6 @@ MIT
 
 **Contact:**  
 For questions or support, open an issue or contact the maintainer.
+
+
+taskkill /IM msedge.exe /F
