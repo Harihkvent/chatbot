@@ -294,7 +294,10 @@ def get_mongo_client():
     """Initializes and returns a cached MongoDB client."""
     logger.info("Connecting to MongoDB...")
     username = quote_plus("chatbot")
-    password = quote_plus(os.getenv("MONGO_PASS"))
+    mongo_pass = os.getenv("MONGO_PASS")
+    if not mongo_pass:
+        raise ValueError("MONGO_PASS environment variable is not set")
+    password = quote_plus(mongo_pass)
     dbname = os.getenv("MONGO_DB")
     mongo_uri = f"mongodb+srv://{username}:{password}@cluster0.57nirib.mongodb.net/{dbname}?retryWrites=true&w=majority&tls=true"
     
