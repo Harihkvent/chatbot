@@ -42,7 +42,7 @@ if not hasattr(st, "prometheus_metrics_server_started"):
         start_http_server(8000)
         logger.info("Prometheus metrics server started on port 8000")
     except Exception as e:
-        logger.warning(f"Prometheus metrics server could not start: {e}")
+        logger.warning(f"Prometheus metrics server could not start : {e}")
     st.prometheus_metrics_server_started = True
 
 # ----------------- Load environment -----------------
