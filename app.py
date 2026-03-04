@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import base64
 import streamlit as st
 from pymongo import MongoClient
 from bson import ObjectId
@@ -1113,7 +1114,7 @@ else:
             st.markdown("### Chat Mode")
             mode_col1, mode_col2 = st.columns(2)
             if mode_col1.button(
-                "Normal" if st.session_state.chat_mode != "normal" else "[Normal]",
+                "Normal" if st.session_state.chat_mode != "normal" else "> Normal",
                 use_container_width=True,
                 key="mode_normal"
             ):
@@ -1121,7 +1122,7 @@ else:
                 st.session_state.current_group_id = None
                 st.rerun()
             if mode_col2.button(
-                "Group" if st.session_state.chat_mode != "group" else "[Group]",
+                "Group" if st.session_state.chat_mode != "group" else "> Group",
                 use_container_width=True,
                 key="mode_group"
             ):
@@ -1168,11 +1169,11 @@ else:
                                 st.session_state.show_rename = None
                                 st.rerun()
                         with col_c2:
-                            if st.button("r", key=f"rename_btn_{chat_id}", help="Rename chat"):
+                            if st.button("Rename", key=f"rename_btn_{chat_id}", help="Rename chat"):
                                 st.session_state.show_rename = chat_id if st.session_state.show_rename != chat_id else None
                                 st.rerun()
                         with col_c3:
-                            if st.button("x", key=f"delete_{chat_id}", help="Delete chat"):
+                            if st.button("Delete", key=f"delete_{chat_id}", help="Delete chat"):
                                 if delete_chat(chat_id):
                                     if chat_id == st.session_state.current_chat_id:
                                         st.session_state.current_chat_id = None
@@ -1237,7 +1238,7 @@ else:
                                 st.rerun()
                         with col_g2:
                             members_str = ", ".join(grp.get("member_emails", []))
-                            st.markdown(f"<span title='{members_str}' style='color:#555;font-size:0.75rem;'>{len(grp.get('member_emails', []))+1}m</span>", unsafe_allow_html=True)
+                            st.markdown(f"<span title='{members_str}' style='color:#555;font-size:0.75rem;'>{len(grp.get('member_emails', []))+1} members</span>", unsafe_allow_html=True)
                 else:
                     st.info("No group chats yet.")
 
@@ -1277,7 +1278,7 @@ else:
                         with col_d1:
                             st.markdown(f'<span class="doc-chip">{doc["filename"][:22]}</span>', unsafe_allow_html=True)
                         with col_d2:
-                            if st.button("x", key=f"remove_doc_{idx}", help="Remove document"):
+                            if st.button("Remove", key=f"remove_doc_{idx}", help="Remove document"):
                                 st.session_state.uploaded_docs.pop(idx)
                                 st.rerun()
             else:
@@ -1293,7 +1294,6 @@ else:
             if img_file is not None:
                 already_img = any(i["filename"] == img_file.name for i in st.session_state.uploaded_images)
                 if not already_img:
-                    import base64
                     img_bytes = img_file.read()
                     img_b64 = base64.b64encode(img_bytes).decode("utf-8")
                     mime = img_file.type or "image/png"
@@ -1312,7 +1312,7 @@ else:
                         st.image(img["bytes"], width=80)
                         st.markdown(f'<span class="img-chip">{img["filename"][:22]}</span>', unsafe_allow_html=True)
                     with col_i2:
-                        if st.button("x", key=f"remove_img_{idx}", help="Remove image"):
+                        if st.button("Remove", key=f"remove_img_{idx}", help="Remove image"):
                             st.session_state.uploaded_images.pop(idx)
                             st.rerun()
 
