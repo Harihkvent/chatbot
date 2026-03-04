@@ -277,6 +277,35 @@ def delete_chat(chat_id):
         logger.error(f"Error deleting chat: {e}")
         return False
 
+def rename_chat(chat_id, new_title):
+    """Rename a chat session"""
+    try:
+        chat_metadata_col = db.chat_metadata
+        chat_metadata_col.update_one(
+            {"_id": ObjectId(chat_id)},
+            {"$set": {"title": new_title.strip(), "updated_at": datetime.now(timezone.utc)}}
+        )
+        return True
+    except Exception as e:
+        logger.error(f"Error renaming chat: {e}")
+        return False
+
+def export_chat_as_markdown(messages, title="Chat Export"):
+    """Export chat messages as a markdown string"""
+    lines = [
+        f"# {title}",
+        f"*Exported on {datetime.now(timezone.utc).strftime('%Y-%m-%d %H:%M UTC')}*",
+        "",
+        "---",
+        "",
+    ]
+    for role, content in messages:
+        if role == "user":
+            lines.append(f"\n## 👤 You\n\n{content}\n")
+        else:
+            lines.append(f"\n## 🤖 Assistant\n\n{content}\n")
+    return "\n".join(lines)
+
 # ----------------- Group Chat Functions -----------------
 def create_group_chat(creator_id, name, member_emails):
     """Create a group chat with a list of member emails"""
@@ -537,11 +566,11 @@ def increment_tokens(user, tokens):
     users_col.update_one({"_id": user["_id"]}, {"$inc": {"tokens_used_today": tokens}})
 
 # ----------------- Krutrim Chat -----------------
-def chat_with_krutrim(messages, api_key=None, model="Krutrim-spectre-v2", max_tokens=2048):
+def chat_with_krutrim(messages, api_key=None, model="Krutrim-spectre-v2", max_tokens=2048, temperature=0.7):
     logger.info(f"Sending chat request to Krutrim API with model: {model}")
     key_to_use = api_key if api_key else DEFAULT_API_KEY
     headers = {"Authorization": f"Bearer {key_to_use}", "Content-Type": "application/json"}
-    payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": 0.7}
+    payload = {"model": model, "messages": messages, "max_tokens": max_tokens, "temperature": temperature}
     try:
         with CHAT_LATENCY.time():
             resp = requests.post(API_URL, headers=headers, json=payload)
@@ -604,6 +633,18 @@ if "current_group_id" not in st.session_state:
     st.session_state.current_group_id = None
 if "show_group_manager" not in st.session_state:
     st.session_state.show_group_manager = False
+if "system_prompt" not in st.session_state:
+    st.session_state.system_prompt = ""
+if "temperature" not in st.session_state:
+    st.session_state.temperature = 0.7
+if "max_tokens" not in st.session_state:
+    st.session_state.max_tokens = 2048
+if "pending_prompt" not in st.session_state:
+    st.session_state.pending_prompt = None
+if "regenerate_requested" not in st.session_state:
+    st.session_state.regenerate_requested = False
+if "show_rename" not in st.session_state:
+    st.session_state.show_rename = None  # chat_id being renamed
 
 # ----------------- OAuth Callback -----------------
 query_params = st.query_params
@@ -1071,6 +1112,9 @@ else:
             model_names = [f"{m['name']} — {m['description']}" for m in AVAILABLE_MODELS]
             model_ids = [m["id"] for m in AVAILABLE_MODELS]
             current_model_idx = model_ids.index(st.session_state.selected_model) if st.session_state.selected_model in model_ids else 0
+            # Keep session state in sync if the stored id was no longer valid
+            if st.session_state.selected_model not in model_ids:
+                st.session_state.selected_model = model_ids[0]
             selected_label = st.selectbox(
                 "Select Model",
                 options=model_names,
@@ -1082,6 +1126,43 @@ else:
             if new_model_id != st.session_state.selected_model:
                 st.session_state.selected_model = new_model_id
                 st.rerun()
+
+            # ---- Model Parameters ----
+            with st.expander("⚙️ Model Parameters", expanded=False):
+                new_temp = st.slider(
+                    "Temperature",
+                    min_value=0.0, max_value=1.5, value=st.session_state.temperature,
+                    step=0.05,
+                    help="Higher = more creative, Lower = more focused"
+                )
+                st.session_state.temperature = new_temp
+
+                new_max_tokens = st.slider(
+                    "Max Response Tokens",
+                    min_value=256, max_value=4096, value=st.session_state.max_tokens,
+                    step=256,
+                    help="Maximum length of the AI response"
+                )
+                st.session_state.max_tokens = new_max_tokens
+
+            # ---- System Prompt / Persona ----
+            with st.expander("🧠 System Prompt / Persona", expanded=False):
+                new_sys = st.text_area(
+                    "Custom instructions for the AI",
+                    value=st.session_state.system_prompt,
+                    placeholder="e.g. You are a helpful coding assistant. Always answer concisely with code examples.",
+                    height=120,
+                    key="system_prompt_input"
+                )
+                sp_col1, sp_col2 = st.columns(2)
+                if sp_col1.button("💾 Apply", use_container_width=True, key="apply_sys_prompt"):
+                    st.session_state.system_prompt = new_sys
+                    st.success("System prompt applied!")
+                if sp_col2.button("🗑️ Clear", use_container_width=True, key="clear_sys_prompt"):
+                    st.session_state.system_prompt = ""
+                    st.rerun()
+                if st.session_state.system_prompt:
+                    st.markdown('<span style="color:#68d391;font-size:0.8rem;">● Custom persona active</span>', unsafe_allow_html=True)
 
             st.markdown("---")
 
@@ -1130,7 +1211,7 @@ else:
                             date_str = created_at.strftime('%Y-%m-%d %H:%M')
                         except Exception:
                             date_str = 'Unknown'
-                        col_c1, col_c2 = st.columns([4, 1])
+                        col_c1, col_c2, col_c3 = st.columns([4, 1, 1])
                         with col_c1:
                             if st.button(
                                 f"💬 {chat_title[:25]}{'...' if len(chat_title) > 25 else ''}",
@@ -1141,14 +1222,29 @@ else:
                                 st.session_state.current_chat_id = chat_id
                                 st.session_state.messages = get_chat_messages(chat_id)
                                 st.session_state.chat_mode = "normal"
+                                st.session_state.show_rename = None
                                 st.rerun()
                         with col_c2:
+                            if st.button("✏️", key=f"rename_btn_{chat_id}", help="Rename chat"):
+                                st.session_state.show_rename = chat_id if st.session_state.show_rename != chat_id else None
+                                st.rerun()
+                        with col_c3:
                             if st.button("🗑️", key=f"delete_{chat_id}", help="Delete chat"):
                                 if delete_chat(chat_id):
                                     if chat_id == st.session_state.current_chat_id:
                                         st.session_state.current_chat_id = None
                                         st.session_state.messages = []
                                     st.success("Chat deleted!")
+                                    st.rerun()
+                        # Inline rename input
+                        if st.session_state.show_rename == chat_id:
+                            new_title_input = st.text_input(
+                                "New title", value=chat_title, key=f"rename_input_{chat_id}"
+                            )
+                            if st.button("Save", key=f"rename_save_{chat_id}", use_container_width=True):
+                                if new_title_input.strip():
+                                    rename_chat(chat_id, new_title_input)
+                                    st.session_state.show_rename = None
                                     st.rerun()
                 else:
                     st.info("No chat history yet. Start a new conversation!")
@@ -1271,6 +1367,24 @@ else:
                 if st.session_state.messages:
                     user_msg_count = len([m for m in st.session_state.messages if m[0] == 'user'])
                     st.markdown(f"**Current Chat:** {user_msg_count} messages")
+                    # Export current chat
+                    chat_title_for_export = "Chat Export"
+                    if st.session_state.current_chat_id:
+                        try:
+                            meta = db.chat_metadata.find_one({"_id": ObjectId(st.session_state.current_chat_id)})
+                            if meta:
+                                chat_title_for_export = meta.get("title", "Chat Export")
+                        except Exception:
+                            pass
+                    md_content = export_chat_as_markdown(st.session_state.messages, chat_title_for_export)
+                    st.download_button(
+                        label="⬇️ Export Chat (.md)",
+                        data=md_content,
+                        file_name=f"chat_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.md",
+                        mime="text/markdown",
+                        use_container_width=True,
+                        key="export_chat_btn"
+                    )
 
     # -------------------------------------------------------------------------
     # MAIN CONTENT
@@ -1334,28 +1448,37 @@ else:
 
             # Welcome screen for empty chat
             if not st.session_state.messages:
-                st.markdown('<div style="text-align: center; margin: 3rem 0 4rem 0; opacity: 0.9;">', unsafe_allow_html=True)
+                st.markdown('<div style="text-align: center; margin: 3rem 0 2rem 0; opacity: 0.9;">', unsafe_allow_html=True)
                 st.markdown('<div style="font-size: 3rem; margin-bottom: 1rem;">🤖</div>', unsafe_allow_html=True)
                 st.markdown('<h1 style="font-size: 2.2rem; margin-bottom: 1rem; font-weight: 600; color: #fff;">YAHANAR AI</h1>', unsafe_allow_html=True)
-                st.markdown('<p style="color: rgba(255,255,255,0.7); font-size: 1.1rem; margin-bottom: 2rem;">How can I help you today?</p>', unsafe_allow_html=True)
-                fc1, fc2, fc3, fc4 = st.columns(4)
-                cards = [
-                    ("💡", "Creative Writing", "Stories, essays, and creative content"),
-                    ("💻", "Programming", "Debug code and learn programming"),
-                    ("🔍", "Research", "Deep dive into topics and analysis"),
-                    ("🎨", "Creative Ideas", "Brainstorm innovative solutions"),
+                st.markdown('<p style="color: rgba(255,255,255,0.7); font-size: 1.1rem; margin-bottom: 1.5rem;">How can I help you today?</p>', unsafe_allow_html=True)
+                st.markdown('</div>', unsafe_allow_html=True)
+                # Prompt template cards (clickable)
+                PROMPT_TEMPLATES = [
+                    ("💡", "Write a story", "Write a short engaging story about a robot discovering emotions"),
+                    ("💻", "Debug my code", "Explain common Python debugging techniques with examples"),
+                    ("🔍", "Summarize a topic", "Give me a concise summary of how large language models work"),
+                    ("🌐", "Translate text", "Translate 'Hello, how are you?' into French, Spanish, German, and Japanese"),
+                    ("📊", "Analyze data", "Explain how to perform exploratory data analysis on a CSV file using pandas"),
+                    ("✍️", "Write an email", "Write a professional email requesting a meeting with a potential client"),
+                    ("🧮", "Solve a problem", "Explain the difference between recursion and iteration with code examples"),
+                    ("🎨", "Brainstorm ideas", "Give me 10 creative business ideas for a sustainable tech startup"),
                 ]
-                for col, (icon, title, desc) in zip([fc1, fc2, fc3, fc4], cards):
+                st.markdown("**✨ Try a prompt template:**")
+                row1 = st.columns(4)
+                row2 = st.columns(4)
+                for col, (icon, label, full_prompt) in zip(row1 + row2, PROMPT_TEMPLATES):
                     with col:
                         st.markdown(f"""
-                            <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 20px;
-                            text-align: left; border: 1px solid rgba(255,255,255,0.1); height: 120px;">
-                                <div style="font-size: 1.5rem; margin-bottom: 8px;">{icon}</div>
-                                <h3 style="margin: 0 0 8px 0; font-size: 1rem; color: #fff;">{title}</h3>
-                                <p style="margin: 0; color: rgba(255,255,255,0.6); font-size: 0.85rem;">{desc}</p>
+                            <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px;
+                            text-align: left; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 8px;">
+                                <div style="font-size: 1.3rem; margin-bottom: 6px;">{icon}</div>
+                                <div style="font-size: 0.9rem; color: #fff; font-weight: 500;">{label}</div>
                             </div>
                         """, unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
+                        if st.button(f"Use →", key=f"template_{label}", use_container_width=True):
+                            st.session_state.pending_prompt = full_prompt
+                            st.rerun()
 
             # Display messages
             logger.info("Rendering chat history")
@@ -1377,12 +1500,33 @@ else:
 
             if st.session_state.messages:
                 st.markdown('<div style="margin-bottom: 2rem;"></div>', unsafe_allow_html=True)
+                # ---- Regenerate last response button ----
+                last_roles = [r for r, _ in st.session_state.messages]
+                if last_roles and last_roles[-1] == "assistant":
+                    regen_col1, regen_col2, regen_col3 = st.columns([3, 1, 3])
+                    with regen_col2:
+                        if st.button("🔄 Regenerate", key="regenerate_btn", help="Regenerate the last AI response"):
+                            st.session_state.regenerate_requested = True
+                            st.rerun()
+                # ---- Token usage bar ----
+                tokens_used = user.get("tokens_used_today", 0)
+                tokens_pct = min(tokens_used / 2000, 1.0)
+                bar_color = "#68d391" if tokens_pct < 0.7 else ("#f6ad55" if tokens_pct < 0.9 else "#fc8181")
+                st.markdown(f"""
+                    <div style="margin: 8px 0; font-size: 0.78rem; color: rgba(255,255,255,0.45);">
+                        Daily tokens: {tokens_used:,} / 2,000
+                        <div style="background:rgba(255,255,255,0.1);border-radius:4px;height:4px;margin-top:4px;">
+                            <div style="width:{tokens_pct*100:.0f}%;height:4px;border-radius:4px;background:{bar_color};"></div>
+                        </div>
+                    </div>
+                """, unsafe_allow_html=True)
 
             # Feature toolbar
             current_model_name = next((m["name"] for m in AVAILABLE_MODELS if m["id"] == st.session_state.selected_model), st.session_state.selected_model)
             ws_indicator = "🟢" if st.session_state.web_search_enabled else "⚪"
             docs_indicator = f"📎{len(st.session_state.uploaded_docs)}" if st.session_state.uploaded_docs else "📎"
             canvas_indicator = "🎨✓" if st.session_state.show_canvas else "🎨"
+            sys_indicator = "🧠✓" if st.session_state.system_prompt else ""
 
             toolbar_col1, toolbar_col2, toolbar_col3, toolbar_col4 = st.columns([1, 1, 1, 3])
             with toolbar_col1:
@@ -1394,7 +1538,7 @@ else:
                     st.session_state.show_canvas = not st.session_state.show_canvas
                     st.rerun()
             with toolbar_col4:
-                st.markdown(f'<div style="padding:6px;color:rgba(255,255,255,0.5);font-size:0.85rem;">Model: <span class="model-badge">{current_model_name}</span></div>', unsafe_allow_html=True)
+                st.markdown(f'<div style="padding:6px;color:rgba(255,255,255,0.5);font-size:0.85rem;">Model: <span class="model-badge">{current_model_name}</span> {sys_indicator}</div>', unsafe_allow_html=True)
 
     if canvas_col is not None:
         with chat_col:
@@ -1408,11 +1552,28 @@ else:
     if is_group and not st.session_state.current_group_id:
         st.info("👥 Select or create a group chat from the sidebar to start chatting.")
     else:
+        # Consume a pending prompt (from template buttons or regenerate)
         prompt = st.chat_input(placeholder_text, key="chat_input")
+        is_regeneration = False
+
+        # Handle regeneration: strip last assistant reply and re-use last user message
+        if st.session_state.regenerate_requested:
+            st.session_state.regenerate_requested = False
+            msgs = st.session_state.messages
+            if len(msgs) >= 2 and msgs[-1][0] == "assistant" and msgs[-2][0] == "user":
+                st.session_state.messages = msgs[:-1]          # drop last assistant reply
+                prompt = msgs[-2][1]                            # re-use last user message
+                is_regeneration = True
+                logger.info("Regeneration requested, re-sending last user message")
+
+        # Template button fired
+        if not prompt and st.session_state.pending_prompt:
+            prompt = st.session_state.pending_prompt
+            st.session_state.pending_prompt = None
 
         if prompt:
             logger.info(f"User sent message: {prompt}")
-            tokens_needed = 512
+            tokens_needed = st.session_state.max_tokens
 
             if not can_use_tokens(user, tokens_needed) and not user.get("api_key"):
                 logger.warning("Token limit reached for user")
@@ -1424,12 +1585,17 @@ else:
                     • ⏰ Wait for tomorrow's reset
                 """, icon="⚠️")
             else:
-                st.session_state.messages.append(("user", prompt))
+                # Append user message unless this is a regeneration (user msg already in history)
+                if not is_regeneration:
+                    st.session_state.messages.append(("user", prompt))
 
                 with st.status("✨ Generating response...", expanded=False) as status:
                     try:
                         # Build system context
                         system_parts = []
+                        # Custom system prompt / persona
+                        if st.session_state.system_prompt.strip():
+                            system_parts.append(st.session_state.system_prompt.strip())
                         if st.session_state.uploaded_docs:
                             doc_ctx = get_document_context(st.session_state.uploaded_docs)
                             if doc_ctx:
@@ -1451,7 +1617,8 @@ else:
                             messages_payload,
                             api_key=user.get("api_key"),
                             model=st.session_state.selected_model,
-                            max_tokens=2048
+                            max_tokens=st.session_state.max_tokens,
+                            temperature=st.session_state.temperature
                         )
 
                         st.session_state.messages.append(("assistant", reply))
