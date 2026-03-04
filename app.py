@@ -1,6 +1,7 @@
 import os
 import io
 import re
+import base64
 import streamlit as st
 from pymongo import MongoClient
 from bson import ObjectId
@@ -301,9 +302,9 @@ def export_chat_as_markdown(messages, title="Chat Export"):
     ]
     for role, content in messages:
         if role == "user":
-            lines.append(f"\n## 👤 You\n\n{content}\n")
+            lines.append(f"\n## You\n\n{content}\n")
         else:
-            lines.append(f"\n## 🤖 Assistant\n\n{content}\n")
+            lines.append(f"\n## Assistant\n\n{content}\n")
     return "\n".join(lines)
 
 # ----------------- Group Chat Functions -----------------
@@ -444,21 +445,27 @@ def get_document_context(docs, max_chars=3000):
 
 # ----------------- Web Search Function -----------------
 def web_search(query, max_results=5):
-    """Search the web using DuckDuckGo and return formatted results"""
+    """Search the web using DuckDuckGo and return (context_string, sources_list)."""
     if not WEB_SEARCH_SUPPORT:
-        return ""
+        return "", []
     try:
         with DDGS() as ddgs:
             results = list(ddgs.text(query, max_results=max_results))
         formatted = []
+        sources = []
         for i, r in enumerate(results, 1):
             formatted.append(
                 f"{i}. **{r.get('title', '')}**\n{r.get('body', '')}\nSource: {r.get('href', '')}"
             )
-        return "\n\n".join(formatted)
+            sources.append({
+                "title": r.get("title", ""),
+                "body": r.get("body", ""),
+                "href": r.get("href", "")
+            })
+        return "\n\n".join(formatted), sources
     except Exception as e:
         logger.error(f"Web search error: {e}")
-        return ""
+        return "", []
 
 # ----------------- Code Block Extraction -----------------
 CANVAS_LANGUAGES = ["python", "javascript", "typescript", "java", "cpp", "c", "bash", "sql", "json", "html", "css", "text"]
@@ -581,16 +588,16 @@ def chat_with_krutrim(messages, api_key=None, model="Krutrim-spectre-v2", max_to
             return data["choices"][0]["message"]["content"], payload["max_tokens"]
         logger.error(f"Krutrim API error: {resp.status_code}, {resp.text}")
         ERROR_COUNT.inc()
-        return f"❌ Error: {resp.status_code}, {resp.text}", 0
+        return f"Error: {resp.status_code}, {resp.text}", 0
     except Exception as e:
         logger.error(f"Exception during chat API call: {e}")
         ERROR_COUNT.inc()
-        return f"❌ Exception: {str(e)}", 0
+        return f"Exception: {str(e)}", 0
 
 # ----------------- Streamlit UI -----------------
 st.set_page_config(
-    page_title="Krutrim Chatbot",
-    page_icon="🤖",
+    page_title="Krutrim AI",
+    page_icon=":material/smart_toy:",
     layout="wide",
     initial_sidebar_state="expanded"
 )
@@ -645,6 +652,10 @@ if "regenerate_requested" not in st.session_state:
     st.session_state.regenerate_requested = False
 if "show_rename" not in st.session_state:
     st.session_state.show_rename = None  # chat_id being renamed
+if "uploaded_images" not in st.session_state:
+    st.session_state.uploaded_images = []  # list of {"filename", "data_url", "bytes"}
+if "message_sources" not in st.session_state:
+    st.session_state.message_sources = {}  # msg_index -> list of source dicts
 
 # ----------------- OAuth Callback -----------------
 query_params = st.query_params
@@ -673,296 +684,232 @@ if "code" in query_params and "state" in query_params and not st.session_state.a
 # ----------------- CSS -----------------
 st.markdown("""
     <style>
-    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600;700&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=Inter:wght@300;400;500;600&display=swap');
+    @import url('https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500&display=swap');
 
-    /* Global Styles */
+    /* ---- Global ---- */
     .stApp {
-        background: linear-gradient(135deg, #0f0f23 0%, #1a1a2e 50%, #16213e 100%);
-        font-family: 'Inter', sans-serif;
+        background: #0f0f0f;
+        font-family: 'Inter', -apple-system, BlinkMacSystemFont, 'Segoe UI', sans-serif;
+        color: #e8e8e8;
     }
+    * { box-sizing: border-box; }
 
-    /* Login Container */
-    .login-container {
-        background: rgba(255, 255, 255, 0.05);
-        backdrop-filter: blur(20px);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 20px;
-        padding: 2.5rem;
-        margin: 2rem auto;
-        max-width: 450px;
-        box-shadow: 0 20px 60px rgba(0, 0, 0, 0.3);
-    }
-
-    /* Navbar */
-    .navbar {
-        position: fixed;
-        top: 0; left: 0; right: 0;
-        background: rgba(15, 15, 35, 0.9);
-        backdrop-filter: blur(20px);
-        color: #fff;
-        padding: 1rem 2rem;
-        z-index: 1000;
-        box-shadow: 0 4px 20px rgba(0,0,0,0.2);
-        display: flex;
-        justify-content: space-between;
-        align-items: center;
-        border-bottom: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    .navbar-title {
-        font-size: 1.4rem;
-        font-weight: 700;
-        letter-spacing: 1px;
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text;
-        -webkit-text-fill-color: transparent;
-        background-clip: text;
-    }
-
-    /* Main app padding */
-    .main .block-container {
-        padding-top: 5rem;
-    }
-
-    /* Sidebar */
+    /* ---- Sidebar ---- */
     section[data-testid="stSidebar"] {
-        background: rgba(15, 15, 35, 0.9);
-        backdrop-filter: blur(20px);
-        border-right: 1px solid rgba(255, 255, 255, 0.1);
+        background: #141414 !important;
+        border-right: 1px solid #1e1e1e !important;
     }
+    section[data-testid="stSidebar"] .stMarkdown p { color: #999 !important; font-size: 0.85rem; }
+    section[data-testid="stSidebar"] h3 { color: #ccc !important; font-size: 0.75rem; font-weight: 600;
+        text-transform: uppercase; letter-spacing: 0.08em; }
+    section[data-testid="stSidebar"] hr { border-color: #1e1e1e !important; margin: 0.75rem 0; }
 
-    /* Buttons */
+    /* ---- Buttons ---- */
     .stButton > button {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        color: #fff;
-        border: none;
-        border-radius: 12px;
-        padding: 0.7rem 1.5rem;
-        font-size: 1rem;
+        background: #1a1a1a;
+        color: #d0d0d0;
+        border: 1px solid #2a2a2a;
+        border-radius: 7px;
+        padding: 0.45rem 0.9rem;
+        font-size: 0.84rem;
         font-weight: 500;
-        transition: all 0.3s ease;
-        box-shadow: 0 4px 15px rgba(102, 126, 234, 0.2);
+        transition: background 0.12s, border-color 0.12s, color 0.12s;
         width: 100%;
-        margin: 0.25rem 0;
+        margin: 0.15rem 0;
     }
     .stButton > button:hover {
-        transform: translateY(-2px);
-        box-shadow: 0 8px 25px rgba(102, 126, 234, 0.4);
-        background: linear-gradient(135deg, #764ba2 0%, #667eea 100%);
+        background: #222;
+        border-color: #4a90d9;
+        color: #fff;
     }
-    .stButton > button:active {
-        transform: translateY(0);
-    }
+    .stButton > button:active { background: #2a2a2a; }
 
-    /* Form Elements */
+    /* ---- Text inputs ---- */
     .stTextInput > div > div > input,
     .stTextArea > div > div > textarea,
     input[type="password"],
     input[type="email"] {
-        background: rgba(255, 255, 255, 0.05);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        border-radius: 12px;
-        color: #fff;
-        padding: 0.8rem 1rem;
-        font-size: 1rem;
-        transition: all 0.3s ease;
+        background: #1a1a1a !important;
+        border: 1px solid #2a2a2a !important;
+        border-radius: 7px !important;
+        color: #e8e8e8 !important;
+        font-size: 0.9rem !important;
     }
     .stTextInput > div > div > input:focus,
-    input[type="password"]:focus,
-    input[type="email"]:focus {
-        border-color: #667eea;
-        box-shadow: 0 0 0 2px rgba(102, 126, 234, 0.2);
-        outline: none;
+    .stTextArea > div > div > textarea:focus {
+        border-color: #4a90d9 !important;
+        box-shadow: 0 0 0 1px rgba(74, 144, 217, 0.3) !important;
     }
 
-    /* Chat Input */
-    .stChatInput {
-        position: sticky;
-        bottom: 0;
-        background: rgba(15, 15, 35, 0.95);
-        backdrop-filter: blur(20px);
-        padding: 20px 0;
-        margin-top: 20px;
-        border-top: 1px solid rgba(255, 255, 255, 0.1);
+    /* ---- Selectbox ---- */
+    .stSelectbox > div > div {
+        background: #1a1a1a;
+        border: 1px solid #2a2a2a;
+        border-radius: 7px;
+        color: #e8e8e8;
     }
-    .stChatInput > div {
-        max-width: 900px;
-        margin: 0 auto;
-    }
+
+    /* ---- Chat input ---- */
+    .stChatInput > div { max-width: 860px; margin: 0 auto; }
     .stChatInput > div > div {
-        background: rgba(64, 65, 79, 0.3);
-        border-radius: 26px;
-        border: 1px solid rgba(255, 255, 255, 0.1);
-        box-shadow: 0 4px 20px rgba(0, 0, 0, 0.1);
-        transition: all 0.3s ease;
+        background: #1a1a1a !important;
+        border: 1px solid #2a2a2a !important;
+        border-radius: 10px !important;
+        transition: border-color 0.12s ease;
     }
     .stChatInput > div > div:focus-within {
-        border-color: rgba(102, 126, 234, 0.5);
-        box-shadow: 0 4px 30px rgba(102, 126, 234, 0.2);
-        background: rgba(64, 65, 79, 0.5);
+        border-color: #4a90d9 !important;
+        box-shadow: 0 0 0 1px rgba(74, 144, 217, 0.2) !important;
     }
-    .stChatInput > div > div > input {
+    .stChatInput textarea { background: transparent !important; color: #e8e8e8 !important; }
+    .stChatInput textarea::placeholder { color: #555 !important; }
+
+    /* ---- Chat messages ---- */
+    [data-testid="stChatMessage"] {
         background: transparent !important;
         border: none !important;
-        color: #ffffff !important;
-        padding: 16px 24px !important;
-        font-size: 16px !important;
-        line-height: 1.5 !important;
-        min-height: 24px !important;
+        max-width: 860px;
+        margin: 0 auto;
+        padding: 0.5rem 0;
     }
-    .stChatInput > div > div > input::placeholder {
-        color: rgba(255, 255, 255, 0.5) !important;
+    [data-testid="stChatMessageContent"] { color: #d8d8d8 !important; line-height: 1.65; }
+
+    /* ---- Code blocks ---- */
+    code, kbd, samp {
+        font-family: 'JetBrains Mono', 'Fira Code', 'Cascadia Code', monospace !important;
+        font-size: 0.86em !important;
+        background: #1e1e1e;
+        border: 1px solid #2a2a2a;
+        border-radius: 4px;
+        padding: 1px 5px;
+        color: #c9d1d9;
+    }
+    pre {
+        background: #161616 !important;
+        border: 1px solid #2a2a2a !important;
+        border-radius: 8px !important;
+        padding: 1rem !important;
+        overflow-x: auto !important;
+    }
+    pre code {
+        background: transparent !important;
+        border: none !important;
+        padding: 0 !important;
+        font-size: 0.875rem !important;
     }
 
-    /* Success/Error Messages */
-    .stSuccess { background: rgba(52, 168, 83, 0.1); border: 1px solid rgba(52, 168, 83, 0.3); border-radius: 12px; }
-    .stError { background: rgba(234, 67, 53, 0.1); border: 1px solid rgba(234, 67, 53, 0.3); border-radius: 12px; }
-    .stInfo { background: rgba(66, 133, 244, 0.1); border: 1px solid rgba(66, 133, 244, 0.3); border-radius: 12px; }
+    /* ---- Source citation cards ---- */
+    .source-card {
+        background: #161616;
+        border: 1px solid #222;
+        border-radius: 7px;
+        padding: 0.55rem 0.8rem;
+        margin: 0.25rem 0;
+        font-size: 0.8rem;
+    }
+    .source-card a { color: #4a90d9; text-decoration: none; }
+    .source-card a:hover { text-decoration: underline; }
+    .source-card-body { color: #888; margin-top: 3px; }
 
-    /* Chat Messages */
-    .user-message {
-        background: #2f2f2f;
-        color: #ffffff;
-        border-radius: 18px;
-        padding: 12px 16px;
-        margin: 8px 0 16px auto;
-        max-width: 80%;
-        word-wrap: break-word;
-        box-shadow: 0 1px 2px rgba(0, 0, 0, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.1);
-    }
-    .assistant-message {
-        background: rgba(247, 247, 248, 0.05);
-        color: #ffffff;
-        border-radius: 18px;
-        padding: 16px 20px;
-        margin: 8px auto 16px 0;
-        max-width: 85%;
-        word-wrap: break-word;
-        box-shadow: 0 1px 3px rgba(0, 0, 0, 0.1);
-        border: 1px solid rgba(255, 255, 255, 0.08);
-        line-height: 1.6;
-    }
-    .message-container { display: flex; align-items: flex-start; margin: 12px 0; gap: 12px; }
-    .user-container { justify-content: flex-end; }
-    .assistant-container { justify-content: flex-start; }
-    .message-avatar {
-        width: 32px; height: 32px; border-radius: 50%;
-        display: flex; align-items: center; justify-content: center;
-        font-size: 14px; flex-shrink: 0; margin-top: 4px;
-    }
-    .user-avatar { background: linear-gradient(135deg, #667eea 0%, #764ba2 100%); color: white; order: 2; }
-    .assistant-avatar { background: linear-gradient(135deg, #f093fb 0%, #f5576c 100%); color: white; }
-
-    /* Typing Indicator */
-    .typing-indicator {
-        display: flex; align-items: center; gap: 8px;
-        color: rgba(255, 255, 255, 0.6); font-style: italic;
-        padding: 12px 16px; background: rgba(255, 255, 255, 0.03);
-        border-radius: 18px; margin: 8px auto 16px 0; max-width: fit-content;
-    }
-    .typing-dots { display: flex; gap: 3px; }
-    .typing-dot {
-        width: 6px; height: 6px; border-radius: 50%;
-        background: rgba(255, 255, 255, 0.4);
-        animation: typing 1.4s infinite;
-    }
-    .typing-dot:nth-child(2) { animation-delay: 0.2s; }
-    .typing-dot:nth-child(3) { animation-delay: 0.4s; }
-    @keyframes typing {
-        0%, 60%, 100% { opacity: 0.3; transform: scale(0.8); }
-        30% { opacity: 1; transform: scale(1); }
-    }
-
-    /* Typography */
-    h1, h2, h3 { color: #fff; font-weight: 600; }
-    h1 {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        -webkit-background-clip: text; -webkit-text-fill-color: transparent;
-        background-clip: text; text-align: center; margin-bottom: 2rem;
-    }
-
-    /* Animations */
-    @keyframes fadeIn { from { opacity: 0; transform: translateY(20px); } to { opacity: 1; transform: translateY(0); } }
-    .fade-in { animation: fadeIn 0.6s ease-out; }
-    .loading-dots::after { content: '.'; animation: dots 1.5s steps(5, end) infinite; }
-    @keyframes dots {
-        0%, 20% { color: rgba(255,255,255,0); text-shadow: .25em 0 0 rgba(255,255,255,0), .5em 0 0 rgba(255,255,255,0); }
-        40% { color: white; text-shadow: .25em 0 0 rgba(255,255,255,0), .5em 0 0 rgba(255,255,255,0); }
-        60% { text-shadow: .25em 0 0 white, .5em 0 0 rgba(255,255,255,0); }
-        80%, 100% { text-shadow: .25em 0 0 white, .5em 0 0 white; }
-    }
-
-    /* Scrollbar */
-    ::-webkit-scrollbar { width: 8px; }
-    ::-webkit-scrollbar-track { background: rgba(255, 255, 255, 0.05); }
-    ::-webkit-scrollbar-thumb { background: rgba(102, 126, 234, 0.5); border-radius: 4px; }
-    ::-webkit-scrollbar-thumb:hover { background: rgba(102, 126, 234, 0.8); }
-
-    /* Stats Cards */
-    .stats-card {
-        background: rgba(255, 255, 255, 0.05); border-radius: 12px; padding: 1rem;
-        margin: 0.5rem 0; border: 1px solid rgba(255, 255, 255, 0.1); text-align: center;
-    }
-    .stats-number { font-size: 1.5rem; font-weight: 700; color: #667eea; }
-    .stats-label { font-size: 0.9rem; color: rgba(255, 255, 255, 0.7); margin-top: 0.25rem; }
-
-    /* Model Badge */
-    .model-badge {
-        background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-        border-radius: 8px; padding: 2px 8px; font-size: 0.75rem; color: white; margin-left: 8px;
-    }
-
-    /* Canvas Panel */
-    .canvas-panel {
-        background: rgba(30, 30, 50, 0.9);
-        border-left: 1px solid rgba(255,255,255,0.1);
+    /* ---- Login container ---- */
+    .login-container {
+        background: #141414;
+        border: 1px solid #222;
         border-radius: 12px;
-        padding: 1rem;
+        padding: 2.5rem;
+        margin: 2rem auto;
+        max-width: 440px;
     }
 
-    /* Feature Toolbar */
-    .feature-toolbar {
-        display: flex; gap: 8px; align-items: center;
-        padding: 8px 0; border-top: 1px solid rgba(255,255,255,0.1);
-        margin-bottom: 8px;
-    }
-
-    /* Doc Chip */
-    .doc-chip {
-        background: rgba(102,126,234,0.2);
-        border: 1px solid rgba(102,126,234,0.4);
-        border-radius: 16px; padding: 4px 10px; font-size: 0.8rem;
-        color: #a0aec0; display: inline-flex; align-items: center; gap: 4px; margin: 2px;
-    }
-
-    /* Fixed header */
+    /* ---- Fixed header ---- */
     .fixed-header {
         position: fixed; top: 0; left: 0; right: 0; z-index: 1000;
-        background: rgba(15, 15, 35, 0.95); backdrop-filter: blur(20px);
-        border-bottom: 1px solid rgba(255,255,255,0.1); padding: 0.8rem 2rem;
+        background: #0f0f0f;
+        border-bottom: 1px solid #1a1a1a;
+        padding: 0.7rem 1.5rem;
     }
     .header-content {
         display: flex; justify-content: space-between; align-items: center;
         max-width: 1200px; margin: 0 auto;
     }
-    .header-title { font-size: 1.4rem; font-weight: 700; color: #667eea; }
-    .header-spacer { height: 70px; }
+    .header-title { font-size: 1rem; font-weight: 600; color: #d8d8d8; letter-spacing: -0.01em; }
+    .header-spacer { height: 58px; }
+
+    /* ---- Model badge ---- */
+    .model-badge {
+        background: #1a1a1a; border: 1px solid #2a2a2a;
+        border-radius: 4px; padding: 2px 7px; font-size: 0.74rem; color: #999;
+    }
+
+    /* ---- Document chip ---- */
+    .doc-chip {
+        background: #1a1a1a; border: 1px solid #2a2a2a;
+        border-radius: 5px; padding: 3px 8px; font-size: 0.78rem;
+        color: #999; display: inline-flex; align-items: center; gap: 4px;
+    }
+
+    /* ---- Status indicators ---- */
+    .status-active { color: #4caf50; font-size: 0.78rem; }
+    .status-inactive { color: #555; font-size: 0.78rem; }
+
+    /* ---- Prompt template cards ---- */
+    .prompt-card {
+        background: #141414; border: 1px solid #222;
+        border-radius: 9px; padding: 12px 14px; margin-bottom: 8px;
+        transition: border-color 0.12s;
+    }
+    .prompt-card:hover { border-color: #4a90d9; }
+    .prompt-card-label { font-size: 0.875rem; font-weight: 500; color: #d0d0d0; }
+    .prompt-card-sub { font-size: 0.76rem; color: #666; margin-top: 3px; }
+
+    /* ---- Canvas panel ---- */
+    .canvas-panel {
+        background: #141414; border: 1px solid #222;
+        border-radius: 10px; padding: 1rem;
+    }
+
+    /* ---- Stats ---- */
+    .stats-number { font-size: 1.3rem; font-weight: 600; color: #4a90d9; }
+    .stats-label { font-size: 0.82rem; color: #888; margin-top: 2px; }
+
+    /* ---- Image preview ---- */
+    .img-chip {
+        background: #1a1a1a; border: 1px solid #2a2a2a;
+        border-radius: 5px; padding: 3px 8px; font-size: 0.78rem;
+        color: #999; display: inline-flex; align-items: center; gap: 4px;
+    }
+
+    /* ---- Streamlit overrides ---- */
+    .main .block-container { padding-top: 5rem; max-width: 100%; }
+    h1, h2, h3, h4 { color: #e0e0e0 !important; font-weight: 600; }
+    p, li { color: #b0b0b0; }
+    .stSuccess { background: rgba(76,175,80,0.1); border: 1px solid rgba(76,175,80,0.3); border-radius: 7px; }
+    .stError   { background: rgba(244,67,54,0.1); border: 1px solid rgba(244,67,54,0.3); border-radius: 7px; }
+    .stInfo    { background: rgba(74,144,217,0.1); border: 1px solid rgba(74,144,217,0.3); border-radius: 7px; }
+    .stWarning { background: rgba(255,152,0,0.1); border: 1px solid rgba(255,152,0,0.3); border-radius: 7px; }
+
+    /* ---- Scrollbar ---- */
+    ::-webkit-scrollbar { width: 6px; height: 6px; }
+    ::-webkit-scrollbar-track { background: #0f0f0f; }
+    ::-webkit-scrollbar-thumb { background: #2a2a2a; border-radius: 3px; }
+    ::-webkit-scrollbar-thumb:hover { background: #3a3a3a; }
+
+    /* ---- Animations ---- */
+    @keyframes fadeUp {
+        from { opacity: 0; transform: translateY(8px); }
+        to   { opacity: 1; transform: translateY(0); }
+    }
+    .fade-in { animation: fadeUp 0.25s ease; }
     </style>
 """, unsafe_allow_html=True)
 
 # ----------------- Navigation Bar -----------------
 if st.session_state.authenticated:
     st.markdown("""
-        <style>
-        .stButton > button {
-            width: 100%; border-radius: 8px; border: 1px solid rgba(255, 255, 255, 0.2);
-            background: rgba(255, 255, 255, 0.1); color: white; transition: all 0.2s ease;
-        }
-        .stButton > button:hover { background: rgba(255, 255, 255, 0.2); border-color: rgba(102, 126, 234, 0.5); }
-        </style>
         <div class="fixed-header">
             <div class="header-content">
-                <div class="header-title">🤖 Krutrim AI</div>
+                <div class="header-title">Krutrim AI</div>
             </div>
         </div>
         <div class="header-spacer"></div>
@@ -970,11 +917,11 @@ if st.session_state.authenticated:
 
     col1, col2, col3 = st.columns([8, 1, 1])
     with col2:
-        if st.button("👤 Profile", help="View profile settings", key="nav_profile"):
+        if st.button("Profile", help="View profile settings", key="nav_profile"):
             st.session_state.show_profile = not st.session_state.show_profile
             st.rerun()
     with col3:
-        if st.button("🚪 Logout", help="Sign out", key="nav_logout"):
+        if st.button("Logout", help="Sign out", key="nav_logout"):
             logger.info(f"User logged out: {st.session_state.user['email']}")
             st.session_state.authenticated = False
             st.session_state.user_email = None
@@ -993,58 +940,56 @@ if not st.session_state.authenticated:
     with col2:
         st.markdown('<div class="login-container fade-in">', unsafe_allow_html=True)
         st.markdown("""
-            <h1 style="text-align: center; margin-bottom: 2rem; font-size: 2.5rem;">
-                🤖 Welcome to YAHANAR AI
-            </h1>
-            <p style="text-align: center; color: rgba(255,255,255,0.7); font-size: 1.1rem; margin-bottom: 2rem;">
-                Your intelligent assistant powered by advanced AI
+            <h2 style="text-align: center; margin-bottom: 0.5rem;">Krutrim AI</h2>
+            <p style="text-align: center; color: #666; font-size: 0.9rem; margin-bottom: 2rem;">
+                Sign in to continue
             </p>
         """, unsafe_allow_html=True)
 
-        choice = st.radio("Choose an option:", ["🔐 Login", "📝 Register"], horizontal=True, key="auth_choice")
+        choice = st.radio("", ["Login", "Register"], horizontal=True, key="auth_choice")
 
         with st.form("login_register_form", clear_on_submit=False):
-            email = st.text_input("📧 Email Address", placeholder="Enter your email address", key="email_input")
-            password = st.text_input("🔒 Password", type="password", placeholder="Enter your password", key="password_input")
-            st.markdown("<div style='margin: 1.5rem 0;'></div>", unsafe_allow_html=True)
+            email = st.text_input("Email", placeholder="you@example.com", key="email_input")
+            password = st.text_input("Password", type="password", placeholder="Password", key="password_input")
+            st.markdown("<div style='margin: 1rem 0;'></div>", unsafe_allow_html=True)
             col_a, col_b = st.columns(2)
-            if "🔐 Login" in choice:
-                login_btn = col_a.form_submit_button("🚀 Login", use_container_width=True)
+            if "Login" in choice:
+                login_btn = col_a.form_submit_button("Login", use_container_width=True)
                 register_btn = False
             else:
-                register_btn = col_a.form_submit_button("📝 Create Account", use_container_width=True)
+                register_btn = col_a.form_submit_button("Create Account", use_container_width=True)
                 login_btn = False
-            st.markdown("<div style='text-align: center; color: rgba(255,255,255,0.5); margin: 1rem 0;'>── or ──</div>", unsafe_allow_html=True)
-            google_signin = st.form_submit_button("🌟 Continue with Google", use_container_width=True)
+            st.markdown("<div style='text-align: center; color: #444; margin: 0.75rem 0; font-size: 0.8rem;'>— or —</div>", unsafe_allow_html=True)
+            google_signin = st.form_submit_button("Continue with Google", use_container_width=True)
 
     if google_signin:
         logger.info("Google sign-in initiated")
         oauth_url = get_google_oauth_url()
         if oauth_url:
             st.markdown(f'<meta http-equiv="refresh" content="1; url={oauth_url}">', unsafe_allow_html=True)
-            st.link_button("🔗 Click here if redirect doesn't work automatically", oauth_url, use_container_width=True)
+            st.link_button("Click here if redirect does not work", oauth_url, use_container_width=True)
         else:
-            st.error("❌ Failed to generate Google OAuth URL. Please check your configuration.")
+            st.error("Failed to generate Google OAuth URL. Please check your configuration.")
         st.markdown('</div>', unsafe_allow_html=True)
 
     if register_btn:
         if not email or not password:
-            st.error("⚠️ Please enter both email and password.")
+            st.error("Please enter both email and password.")
         elif len(password) < 6:
-            st.error("⚠️ Password must be at least 6 characters long.")
+            st.error("Password must be at least 6 characters long.")
         elif "@" not in email or "." not in email:
-            st.error("⚠️ Please enter a valid email address.")
+            st.error("Please enter a valid email address.")
         else:
             with st.spinner("Creating your account..."):
                 success, msg = register_user(email, password)
                 if success:
-                    st.success(f"🎉 {msg} Please login with your credentials.")
+                    st.success(f"{msg} Please login with your credentials.")
                 else:
-                    st.error(f"❌ {msg}")
+                    st.error(msg)
 
     if login_btn:
         if not email or not password:
-            st.error("⚠️ Please enter both email and password.")
+            st.error("Please enter both email and password.")
         else:
             with st.spinner("Signing you in..."):
                 success, user_or_msg = login_user(email, password)
@@ -1054,10 +999,10 @@ if not st.session_state.authenticated:
                     st.session_state.user = user_or_msg
                     st.session_state.messages = []
                     logger.info(f"User logged in: {email}")
-                    st.success("✅ Login successful! Redirecting...")
+                    st.success("Login successful! Redirecting...")
                     st.rerun()
                 else:
-                    st.error(f"❌ {user_or_msg}")
+                    st.error(user_or_msg)
 
 # =============================================================================
 # AUTHENTICATED CHAT UI
@@ -1073,42 +1018,41 @@ else:
     with st.sidebar:
         if show_profile_in_sidebar:
             # ---- Profile Section ----
-            st.markdown("### 👤 Profile & Settings")
-            if st.button("← Back to Chats", use_container_width=True):
+            st.markdown("### Profile & Settings")
+            if st.button("Back to Chats", use_container_width=True):
                 st.session_state.show_profile = False
                 st.rerun()
             st.markdown("---")
             if user.get("picture"):
-                st.image(user["picture"], width=80)
+                st.image(user["picture"], width=72)
             if user.get("name"):
                 st.write(f"**Name:** {user['name']}")
             st.write(f"**Email:** {user['email']}")
             if user.get("auth_method"):
-                auth_icon = "🌟" if user['auth_method'] == 'google' else "📧"
-                st.write(f"**Sign-in method:** {auth_icon} {user['auth_method'].title()}")
+                st.write(f"**Sign-in:** {user['auth_method'].title()}")
             st.markdown("---")
             tokens_used = user.get('tokens_used_today', 0)
             tokens_remaining = 2000 - tokens_used
             progress_percent = min(tokens_used / 2000, 1.0)
-            st.markdown("#### 📊 Usage Statistics")
+            st.markdown("#### Usage")
             st.metric("Tokens Used Today", f"{tokens_used:,}", f"{tokens_remaining:,} remaining")
             st.progress(progress_percent)
             st.markdown("---")
-            st.markdown("#### 🔑 API Key")
+            st.markdown("#### API Key")
             api_key_input = st.text_input("Custom API Key (optional)", value=user.get("api_key") or "", type="password", key="profile_api_key")
             col_api1, col_api2 = st.columns(2)
-            if col_api1.button("💾 Save", use_container_width=True, key="save_api_profile"):
+            if col_api1.button("Save", use_container_width=True, key="save_api_profile"):
                 users_col.update_one({"_id": user["_id"]}, {"$set": {"api_key": api_key_input}})
                 user["api_key"] = api_key_input
                 st.success("API Key saved!")
-            if col_api2.button("🗑️ Delete", use_container_width=True, key="delete_api_profile"):
+            if col_api2.button("Delete", use_container_width=True, key="delete_api_profile"):
                 users_col.update_one({"_id": user["_id"]}, {"$set": {"api_key": None}})
                 user["api_key"] = None
                 st.success("API Key deleted!")
 
         else:
             # ---- Model Selector ----
-            st.markdown("### 🤖 Model")
+            st.markdown("### Model")
             model_names = [f"{m['name']} — {m['description']}" for m in AVAILABLE_MODELS]
             model_ids = [m["id"] for m in AVAILABLE_MODELS]
             current_model_idx = model_ids.index(st.session_state.selected_model) if st.session_state.selected_model in model_ids else 0
@@ -1128,7 +1072,7 @@ else:
                 st.rerun()
 
             # ---- Model Parameters ----
-            with st.expander("⚙️ Model Parameters", expanded=False):
+            with st.expander("Model Parameters", expanded=False):
                 new_temp = st.slider(
                     "Temperature",
                     min_value=0.0, max_value=1.5, value=st.session_state.temperature,
@@ -1146,7 +1090,7 @@ else:
                 st.session_state.max_tokens = new_max_tokens
 
             # ---- System Prompt / Persona ----
-            with st.expander("🧠 System Prompt / Persona", expanded=False):
+            with st.expander("System Prompt / Persona", expanded=False):
                 new_sys = st.text_area(
                     "Custom instructions for the AI",
                     value=st.session_state.system_prompt,
@@ -1155,22 +1099,22 @@ else:
                     key="system_prompt_input"
                 )
                 sp_col1, sp_col2 = st.columns(2)
-                if sp_col1.button("💾 Apply", use_container_width=True, key="apply_sys_prompt"):
+                if sp_col1.button("Apply", use_container_width=True, key="apply_sys_prompt"):
                     st.session_state.system_prompt = new_sys
                     st.success("System prompt applied!")
-                if sp_col2.button("🗑️ Clear", use_container_width=True, key="clear_sys_prompt"):
+                if sp_col2.button("Clear", use_container_width=True, key="clear_sys_prompt"):
                     st.session_state.system_prompt = ""
                     st.rerun()
                 if st.session_state.system_prompt:
-                    st.markdown('<span style="color:#68d391;font-size:0.8rem;">● Custom persona active</span>', unsafe_allow_html=True)
+                    st.markdown('<span class="status-active">● Persona active</span>', unsafe_allow_html=True)
 
             st.markdown("---")
 
             # ---- Chat Mode Toggle ----
-            st.markdown("### 💬 Chat Mode")
+            st.markdown("### Chat Mode")
             mode_col1, mode_col2 = st.columns(2)
             if mode_col1.button(
-                "🗨️ Normal" if st.session_state.chat_mode != "normal" else "✅ Normal",
+                "Normal" if st.session_state.chat_mode != "normal" else "> Normal",
                 use_container_width=True,
                 key="mode_normal"
             ):
@@ -1178,7 +1122,7 @@ else:
                 st.session_state.current_group_id = None
                 st.rerun()
             if mode_col2.button(
-                "👥 Group" if st.session_state.chat_mode != "group" else "✅ Group",
+                "Group" if st.session_state.chat_mode != "group" else "> Group",
                 use_container_width=True,
                 key="mode_group"
             ):
@@ -1189,13 +1133,13 @@ else:
 
             # ---- Normal Chats or Group Chats ----
             if st.session_state.chat_mode == "normal":
-                st.markdown("### 🗂️ Chat History")
-                if st.button("➕ New Chat", use_container_width=True, key="new_chat_sidebar"):
+                st.markdown("### Chats")
+                if st.button("+ New Chat", use_container_width=True, key="new_chat_sidebar"):
                     new_chat_id = create_new_chat(user["_id"])
                     if new_chat_id:
                         st.session_state.current_chat_id = new_chat_id
                         st.session_state.messages = []
-                        st.success("Started new chat!")
+                        st.success("New chat started.")
                         st.rerun()
                     else:
                         st.error("Failed to create new chat.")
@@ -1214,7 +1158,7 @@ else:
                         col_c1, col_c2, col_c3 = st.columns([4, 1, 1])
                         with col_c1:
                             if st.button(
-                                f"💬 {chat_title[:25]}{'...' if len(chat_title) > 25 else ''}",
+                                f"{chat_title[:25]}{'...' if len(chat_title) > 25 else ''}",
                                 key=f"chat_{chat_id}",
                                 help=f"Messages: {message_count}\nCreated: {date_str}",
                                 use_container_width=True
@@ -1225,16 +1169,16 @@ else:
                                 st.session_state.show_rename = None
                                 st.rerun()
                         with col_c2:
-                            if st.button("✏️", key=f"rename_btn_{chat_id}", help="Rename chat"):
+                            if st.button("Rename", key=f"rename_btn_{chat_id}", help="Rename chat"):
                                 st.session_state.show_rename = chat_id if st.session_state.show_rename != chat_id else None
                                 st.rerun()
                         with col_c3:
-                            if st.button("🗑️", key=f"delete_{chat_id}", help="Delete chat"):
+                            if st.button("Delete", key=f"delete_{chat_id}", help="Delete chat"):
                                 if delete_chat(chat_id):
                                     if chat_id == st.session_state.current_chat_id:
                                         st.session_state.current_chat_id = None
                                         st.session_state.messages = []
-                                    st.success("Chat deleted!")
+                                    st.success("Chat deleted.")
                                     st.rerun()
                         # Inline rename input
                         if st.session_state.show_rename == chat_id:
@@ -1251,8 +1195,8 @@ else:
 
             else:
                 # ---- Group Chats ----
-                st.markdown("### 👥 Group Chats")
-                if st.button("➕ Create Group", use_container_width=True, key="create_group_btn"):
+                st.markdown("### Group Chats")
+                if st.button("+ Create Group", use_container_width=True, key="create_group_btn"):
                     st.session_state.show_group_manager = not st.session_state.show_group_manager
                     st.rerun()
 
@@ -1269,7 +1213,7 @@ else:
                                     st.session_state.current_group_id = new_grp_id
                                     st.session_state.messages = []
                                     st.session_state.show_group_manager = False
-                                    st.success(f"Group '{grp_name}' created!")
+                                    st.success(f"Group '{grp_name}' created.")
                                     st.rerun()
                                 else:
                                     st.error("Failed to create group.")
@@ -1285,7 +1229,7 @@ else:
                         col_g1, col_g2 = st.columns([4, 1])
                         with col_g1:
                             if st.button(
-                                f"👥 {grp_title[:22]}{'...' if len(grp_title) > 22 else ''}",
+                                f"{grp_title[:22]}{'...' if len(grp_title) > 22 else ''}",
                                 key=f"grp_{grp_id}",
                                 use_container_width=True
                             ):
@@ -1294,14 +1238,14 @@ else:
                                 st.rerun()
                         with col_g2:
                             members_str = ", ".join(grp.get("member_emails", []))
-                            st.markdown(f"<span title='{members_str}' style='color:rgba(255,255,255,0.4);font-size:0.75rem;'>👤{len(grp.get('member_emails', []))+1}</span>", unsafe_allow_html=True)
+                            st.markdown(f"<span title='{members_str}' style='color:#555;font-size:0.75rem;'>{len(grp.get('member_emails', []))+1} members</span>", unsafe_allow_html=True)
                 else:
                     st.info("No group chats yet.")
 
             st.markdown("---")
 
-            # ---- Document Upload ----
-            st.markdown("### 📎 Documents")
+            # ---- Attachments (Documents + Images) ----
+            st.markdown("### Attachments")
             support_info = []
             if PDF_SUPPORT:
                 support_info.append("pdf")
@@ -1324,26 +1268,58 @@ else:
                         with st.spinner(f"Processing {uploaded_file.name}..."):
                             doc_data = extract_text_from_file(uploaded_file)
                             st.session_state.uploaded_docs.append(doc_data)
-                        st.success(f"✅ Added: {uploaded_file.name}")
+                        st.success(f"Added: {uploaded_file.name}")
                         st.rerun()
 
                 if st.session_state.uploaded_docs:
-                    st.markdown("**Loaded documents:**")
+                    st.markdown("**Documents:**")
                     for idx, doc in enumerate(st.session_state.uploaded_docs):
                         col_d1, col_d2 = st.columns([4, 1])
                         with col_d1:
-                            st.markdown(f'<span class="doc-chip">📄 {doc["filename"][:20]}</span>', unsafe_allow_html=True)
+                            st.markdown(f'<span class="doc-chip">{doc["filename"][:22]}</span>', unsafe_allow_html=True)
                         with col_d2:
-                            if st.button("✕", key=f"remove_doc_{idx}", help="Remove document"):
+                            if st.button("Remove", key=f"remove_doc_{idx}", help="Remove document"):
                                 st.session_state.uploaded_docs.pop(idx)
                                 st.rerun()
             else:
                 st.info("Install pypdf, python-docx, openpyxl for document support.")
 
+            # Image upload
+            img_file = st.file_uploader(
+                "Upload image (PNG/JPG/WEBP)",
+                type=["png", "jpg", "jpeg", "gif", "webp"],
+                key="img_uploader",
+                label_visibility="collapsed"
+            )
+            if img_file is not None:
+                already_img = any(i["filename"] == img_file.name for i in st.session_state.uploaded_images)
+                if not already_img:
+                    img_bytes = img_file.read()
+                    img_b64 = base64.b64encode(img_bytes).decode("utf-8")
+                    mime = img_file.type or "image/png"
+                    st.session_state.uploaded_images.append({
+                        "filename": img_file.name,
+                        "data_url": f"data:{mime};base64,{img_b64}",
+                        "bytes": img_bytes
+                    })
+                    st.rerun()
+
+            if st.session_state.uploaded_images:
+                st.markdown("**Images:**")
+                for idx, img in enumerate(st.session_state.uploaded_images):
+                    col_i1, col_i2 = st.columns([4, 1])
+                    with col_i1:
+                        st.image(img["bytes"], width=80)
+                        st.markdown(f'<span class="img-chip">{img["filename"][:22]}</span>', unsafe_allow_html=True)
+                    with col_i2:
+                        if st.button("Remove", key=f"remove_img_{idx}", help="Remove image"):
+                            st.session_state.uploaded_images.pop(idx)
+                            st.rerun()
+
             st.markdown("---")
 
             # ---- Web Search Toggle ----
-            st.markdown("### 🔍 Web Search")
+            st.markdown("### Web Search")
             if WEB_SEARCH_SUPPORT:
                 ws_enabled = st.checkbox(
                     "Enable web search",
@@ -1354,7 +1330,7 @@ else:
                     st.session_state.web_search_enabled = ws_enabled
                     st.rerun()
                 if st.session_state.web_search_enabled:
-                    st.markdown('<span style="color:#68d391;">● Web search active</span>', unsafe_allow_html=True)
+                    st.markdown('<span class="status-active">● Web search active</span>', unsafe_allow_html=True)
             else:
                 st.info("Install duckduckgo_search for web search support.")
 
@@ -1378,7 +1354,7 @@ else:
                             pass
                     md_content = export_chat_as_markdown(st.session_state.messages, chat_title_for_export)
                     st.download_button(
-                        label="⬇️ Export Chat (.md)",
+                        label="Export Chat (.md)",
                         data=md_content,
                         file_name=f"chat_{datetime.now(timezone.utc).strftime('%Y%m%d_%H%M')}.md",
                         mime="text/markdown",
@@ -1401,7 +1377,7 @@ else:
     if canvas_col is not None:
         with canvas_col:
             st.markdown('<div class="canvas-panel">', unsafe_allow_html=True)
-            st.markdown("### 🎨 Canvas")
+            st.markdown("### Canvas")
             canvas_lang = st.selectbox(
                 "Language",
                 CANVAS_LANGUAGES,
@@ -1410,7 +1386,7 @@ else:
             )
             st.session_state.canvas_language = canvas_lang
             st.code(st.session_state.canvas_content, language=canvas_lang)
-            if st.button("✕ Close Canvas", use_container_width=True, key="close_canvas"):
+            if st.button("Close Canvas", use_container_width=True, key="close_canvas"):
                 st.session_state.show_canvas = False
                 st.session_state.canvas_content = None
                 st.rerun()
@@ -1427,14 +1403,13 @@ else:
                     if grp_doc:
                         members_display = ", ".join(grp_doc.get("member_emails", []))
                         st.markdown(f"""
-                            <div style="background:rgba(102,126,234,0.1);border:1px solid rgba(102,126,234,0.3);
-                            border-radius:12px;padding:1rem;margin-bottom:1rem;">
-                                <strong style="color:#667eea;">👥 {grp_doc.get('name','Group Chat')}</strong><br>
-                                <span style="color:rgba(255,255,255,0.6);font-size:0.85rem;">Members: {members_display or 'Just you'}</span>
+                            <div style="background:#161616;border:1px solid #2a2a2a;
+                            border-radius:8px;padding:0.8rem 1rem;margin-bottom:1rem;">
+                                <strong style="color:#d0d0d0;">{grp_doc.get('name','Group Chat')}</strong><br>
+                                <span style="color:#666;font-size:0.82rem;">Members: {members_display or 'Just you'}</span>
                             </div>
                         """, unsafe_allow_html=True)
-                        # Add member form
-                        with st.expander("➕ Add Member"):
+                        with st.expander("Add Member"):
                             new_member_email = st.text_input("Member email", key="add_member_email")
                             if st.button("Add", key="add_member_btn"):
                                 if new_member_email:
@@ -1448,97 +1423,108 @@ else:
 
             # Welcome screen for empty chat
             if not st.session_state.messages:
-                st.markdown('<div style="text-align: center; margin: 3rem 0 2rem 0; opacity: 0.9;">', unsafe_allow_html=True)
-                st.markdown('<div style="font-size: 3rem; margin-bottom: 1rem;">🤖</div>', unsafe_allow_html=True)
-                st.markdown('<h1 style="font-size: 2.2rem; margin-bottom: 1rem; font-weight: 600; color: #fff;">YAHANAR AI</h1>', unsafe_allow_html=True)
-                st.markdown('<p style="color: rgba(255,255,255,0.7); font-size: 1.1rem; margin-bottom: 1.5rem;">How can I help you today?</p>', unsafe_allow_html=True)
-                st.markdown('</div>', unsafe_allow_html=True)
-                # Prompt template cards (clickable)
+                st.markdown("""
+                    <div style="text-align:center;margin:4rem 0 2.5rem 0;">
+                        <div style="font-size:1.8rem;font-weight:600;color:#d0d0d0;margin-bottom:0.5rem;">
+                            Krutrim AI
+                        </div>
+                        <div style="color:#555;font-size:0.9rem;">How can I help you today?</div>
+                    </div>
+                """, unsafe_allow_html=True)
+                # Prompt template cards
                 PROMPT_TEMPLATES = [
-                    ("💡", "Write a story", "Write a short engaging story about a robot discovering emotions"),
-                    ("💻", "Debug my code", "Explain common Python debugging techniques with examples"),
-                    ("🔍", "Summarize a topic", "Give me a concise summary of how large language models work"),
-                    ("🌐", "Translate text", "Translate 'Hello, how are you?' into French, Spanish, German, and Japanese"),
-                    ("📊", "Analyze data", "Explain how to perform exploratory data analysis on a CSV file using pandas"),
-                    ("✍️", "Write an email", "Write a professional email requesting a meeting with a potential client"),
-                    ("🧮", "Solve a problem", "Explain the difference between recursion and iteration with code examples"),
-                    ("🎨", "Brainstorm ideas", "Give me 10 creative business ideas for a sustainable tech startup"),
+                    ("Write a story", "Write a short engaging story about a robot discovering emotions"),
+                    ("Debug code", "Explain common Python debugging techniques with examples"),
+                    ("Summarize topic", "Give me a concise summary of how large language models work"),
+                    ("Translate text", "Translate 'Hello, how are you?' into French, Spanish, and Japanese"),
+                    ("Analyze data", "Explain how to perform exploratory data analysis on a CSV using pandas"),
+                    ("Write an email", "Write a professional email requesting a meeting with a potential client"),
+                    ("Explain recursion", "Explain the difference between recursion and iteration with code examples"),
+                    ("Brainstorm ideas", "Give me 10 creative business ideas for a sustainable tech startup"),
                 ]
-                st.markdown("**✨ Try a prompt template:**")
+                st.markdown("<div style='color:#666;font-size:0.82rem;margin-bottom:0.5rem;'>Suggested prompts</div>", unsafe_allow_html=True)
                 row1 = st.columns(4)
                 row2 = st.columns(4)
-                for col, (icon, label, full_prompt) in zip(row1 + row2, PROMPT_TEMPLATES):
+                for col, (label, full_prompt) in zip(row1 + row2, PROMPT_TEMPLATES):
                     with col:
                         st.markdown(f"""
-                            <div style="background: rgba(255,255,255,0.05); border-radius: 12px; padding: 16px;
-                            text-align: left; border: 1px solid rgba(255,255,255,0.1); margin-bottom: 8px;">
-                                <div style="font-size: 1.3rem; margin-bottom: 6px;">{icon}</div>
-                                <div style="font-size: 0.9rem; color: #fff; font-weight: 500;">{label}</div>
+                            <div class="prompt-card">
+                                <div class="prompt-card-label">{label}</div>
                             </div>
                         """, unsafe_allow_html=True)
-                        if st.button(f"Use →", key=f"template_{label}", use_container_width=True):
+                        if st.button("Use", key=f"template_{label}", use_container_width=True):
                             st.session_state.pending_prompt = full_prompt
                             st.rerun()
 
-            # Display messages
+            # Display messages using st.chat_message for native markdown + code block rendering
             logger.info("Rendering chat history")
             for i, (role, text) in enumerate(st.session_state.messages):
-                if role == "user":
-                    st.markdown(f"""
-                        <div class="message-container user-container fade-in">
-                            <div class="user-message">{text}</div>
-                            <div class="message-avatar user-avatar">👤</div>
-                        </div>
-                    """, unsafe_allow_html=True)
-                else:
-                    st.markdown(f'''
-                        <div class="message-container assistant-container slide-in">
-                            <div class="message-avatar assistant-avatar">🤖</div>
-                            <div class="assistant-message"><div class="message-content">{text}</div></div>
-                        </div>
-                    ''', unsafe_allow_html=True)
+                with st.chat_message("user" if role == "user" else "assistant"):
+                    st.markdown(text)
+                # Show web search sources below assistant messages if available
+                if role == "assistant":
+                    sources = st.session_state.message_sources.get(i, [])
+                    if sources:
+                        with st.expander(f"Sources ({len(sources)})", expanded=False):
+                            for src in sources:
+                                title = src.get("title", "Source")
+                                href = src.get("href", "#")
+                                body = src.get("body", "")
+                                body_preview = body[:120] + "..." if len(body) > 120 else body
+                                st.markdown(
+                                    f'<div class="source-card">'
+                                    f'<a href="{href}" target="_blank">{title}</a>'
+                                    f'<div class="source-card-body">{body_preview}</div>'
+                                    f'</div>',
+                                    unsafe_allow_html=True
+                                )
 
             if st.session_state.messages:
-                st.markdown('<div style="margin-bottom: 2rem;"></div>', unsafe_allow_html=True)
+                st.markdown('<div style="margin-bottom: 1.5rem;"></div>', unsafe_allow_html=True)
                 # ---- Regenerate last response button ----
                 last_roles = [r for r, _ in st.session_state.messages]
                 if last_roles and last_roles[-1] == "assistant":
                     regen_col1, regen_col2, regen_col3 = st.columns([3, 1, 3])
                     with regen_col2:
-                        if st.button("🔄 Regenerate", key="regenerate_btn", help="Regenerate the last AI response"):
+                        if st.button("Regenerate", key="regenerate_btn", help="Regenerate the last AI response"):
                             st.session_state.regenerate_requested = True
                             st.rerun()
                 # ---- Token usage bar ----
                 tokens_used = user.get("tokens_used_today", 0)
                 tokens_pct = min(tokens_used / 2000, 1.0)
-                bar_color = "#68d391" if tokens_pct < 0.7 else ("#f6ad55" if tokens_pct < 0.9 else "#fc8181")
+                bar_color = "#4caf50" if tokens_pct < 0.7 else ("#ff9800" if tokens_pct < 0.9 else "#f44336")
                 st.markdown(f"""
-                    <div style="margin: 8px 0; font-size: 0.78rem; color: rgba(255,255,255,0.45);">
-                        Daily tokens: {tokens_used:,} / 2,000
-                        <div style="background:rgba(255,255,255,0.1);border-radius:4px;height:4px;margin-top:4px;">
-                            <div style="width:{tokens_pct*100:.0f}%;height:4px;border-radius:4px;background:{bar_color};"></div>
+                    <div style="margin: 8px 0; font-size: 0.76rem; color: #444;">
+                        Tokens: {tokens_used:,} / 2,000
+                        <div style="background:#1a1a1a;border-radius:3px;height:3px;margin-top:4px;">
+                            <div style="width:{tokens_pct*100:.0f}%;height:3px;border-radius:3px;background:{bar_color};"></div>
                         </div>
                     </div>
                 """, unsafe_allow_html=True)
 
-            # Feature toolbar
+            # Status bar
             current_model_name = next((m["name"] for m in AVAILABLE_MODELS if m["id"] == st.session_state.selected_model), st.session_state.selected_model)
-            ws_indicator = "🟢" if st.session_state.web_search_enabled else "⚪"
-            docs_indicator = f"📎{len(st.session_state.uploaded_docs)}" if st.session_state.uploaded_docs else "📎"
-            canvas_indicator = "🎨✓" if st.session_state.show_canvas else "🎨"
-            sys_indicator = "🧠✓" if st.session_state.system_prompt else ""
+            ws_status = "web-search on" if st.session_state.web_search_enabled else ""
+            docs_status = f"{len(st.session_state.uploaded_docs)} doc(s)" if st.session_state.uploaded_docs else ""
+            imgs_status = f"{len(st.session_state.uploaded_images)} img(s)" if st.session_state.uploaded_images else ""
+            persona_status = "persona on" if st.session_state.system_prompt else ""
+            status_parts = [p for p in [ws_status, docs_status, imgs_status, persona_status] if p]
+            status_text = " · ".join(status_parts) if status_parts else ""
 
-            toolbar_col1, toolbar_col2, toolbar_col3, toolbar_col4 = st.columns([1, 1, 1, 3])
+            toolbar_col1, toolbar_col2, toolbar_col3 = st.columns([1, 1, 4])
             with toolbar_col1:
-                st.markdown(f'<div style="padding:6px;text-align:center;color:rgba(255,255,255,0.7);">{docs_indicator}</div>', unsafe_allow_html=True)
-            with toolbar_col2:
-                st.markdown(f'<div style="padding:6px;text-align:center;" title="Web Search">{ws_indicator} Search</div>', unsafe_allow_html=True)
-            with toolbar_col3:
-                if st.button(canvas_indicator, key="toggle_canvas_toolbar", help="Toggle Canvas"):
+                if st.button("Canvas", key="toggle_canvas_toolbar", help="Toggle code canvas"):
                     st.session_state.show_canvas = not st.session_state.show_canvas
                     st.rerun()
-            with toolbar_col4:
-                st.markdown(f'<div style="padding:6px;color:rgba(255,255,255,0.5);font-size:0.85rem;">Model: <span class="model-badge">{current_model_name}</span> {sys_indicator}</div>', unsafe_allow_html=True)
+            with toolbar_col2:
+                st.markdown(
+                    f'<div style="padding:6px 0;color:#444;font-size:0.8rem;">'
+                    f'<span class="model-badge">{current_model_name}</span></div>',
+                    unsafe_allow_html=True
+                )
+            with toolbar_col3:
+                if status_text:
+                    st.markdown(f'<div style="padding:6px 0;color:#555;font-size:0.78rem;">{status_text}</div>', unsafe_allow_html=True)
 
     if canvas_col is not None:
         with chat_col:
@@ -1550,19 +1536,18 @@ else:
     is_group = st.session_state.chat_mode == "group"
     placeholder_text = "Message group..." if is_group else "Message Krutrim AI..."
     if is_group and not st.session_state.current_group_id:
-        st.info("👥 Select or create a group chat from the sidebar to start chatting.")
+        st.info("Select or create a group chat from the sidebar to start chatting.")
     else:
-        # Consume a pending prompt (from template buttons or regenerate)
         prompt = st.chat_input(placeholder_text, key="chat_input")
         is_regeneration = False
 
-        # Handle regeneration: strip last assistant reply and re-use last user message
+        # Handle regeneration
         if st.session_state.regenerate_requested:
             st.session_state.regenerate_requested = False
             msgs = st.session_state.messages
             if len(msgs) >= 2 and msgs[-1][0] == "assistant" and msgs[-2][0] == "user":
-                st.session_state.messages = msgs[:-1]          # drop last assistant reply
-                prompt = msgs[-2][1]                            # re-use last user message
+                st.session_state.messages = msgs[:-1]
+                prompt = msgs[-2][1]
                 is_regeneration = True
                 logger.info("Regeneration requested, re-sending last user message")
 
@@ -1577,23 +1562,18 @@ else:
 
             if not can_use_tokens(user, tokens_needed) and not user.get("api_key"):
                 logger.warning("Token limit reached for user")
-                st.error("""
-                    🚫 **Daily Token Limit Reached**
-
-                    You've used all 2,000 free tokens for today. To continue:
-                    • 🔑 Add your Krutrim API key in the sidebar
-                    • ⏰ Wait for tomorrow's reset
-                """, icon="⚠️")
+                st.error(
+                    "**Daily Token Limit Reached** — You've used all 2,000 free tokens for today. "
+                    "Add your Krutrim API key in Profile settings or wait for tomorrow's reset."
+                )
             else:
-                # Append user message unless this is a regeneration (user msg already in history)
+                # Append user message unless regeneration (already in history)
                 if not is_regeneration:
                     st.session_state.messages.append(("user", prompt))
 
-                with st.status("✨ Generating response...", expanded=False) as status:
+                with st.status("Generating response...", expanded=False) as status:
                     try:
-                        # Build system context
                         system_parts = []
-                        # Custom system prompt / persona
                         if st.session_state.system_prompt.strip():
                             system_parts.append(st.session_state.system_prompt.strip())
                         if st.session_state.uploaded_docs:
@@ -1601,13 +1581,25 @@ else:
                             if doc_ctx:
                                 system_parts.append(f"The user has uploaded the following documents for reference:\n\n{doc_ctx}")
 
+                        # Include uploaded images as base64 in the user message content (vision-capable models)
+                        web_sources = []
                         if st.session_state.web_search_enabled:
-                            with st.spinner("🔍 Searching the web..."):
-                                search_results = web_search(prompt)
-                            if search_results:
-                                system_parts.append(f"Web search results for the user's query:\n\n{search_results}")
+                            with st.spinner("Searching the web..."):
+                                search_context, web_sources = web_search(prompt)
+                            if search_context:
+                                system_parts.append(f"Web search results for the user's query:\n\n{search_context}")
 
                         messages_payload = [{"role": r, "content": c} for r, c in st.session_state.messages]
+
+                        # Attach images to the last user message if any (OpenAI vision format)
+                        if st.session_state.uploaded_images and messages_payload and messages_payload[-1]["role"] == "user":
+                            content_parts = [{"type": "text", "text": messages_payload[-1]["content"]}]
+                            for img in st.session_state.uploaded_images:
+                                content_parts.append({
+                                    "type": "image_url",
+                                    "image_url": {"url": img["data_url"]}
+                                })
+                            messages_payload[-1]["content"] = content_parts
 
                         if system_parts:
                             system_content = "\n\n".join(system_parts)
@@ -1622,6 +1614,11 @@ else:
                         )
 
                         st.session_state.messages.append(("assistant", reply))
+
+                        # Store web sources for this assistant message index
+                        if web_sources:
+                            assistant_msg_idx = len(st.session_state.messages) - 1
+                            st.session_state.message_sources[assistant_msg_idx] = web_sources
 
                         # Extract code blocks → canvas
                         code_blocks = extract_code_blocks(reply)
@@ -1657,12 +1654,12 @@ else:
                         user = users_col.find_one({"_id": user["_id"]})
                         st.session_state.user = user
                         CHAT_COUNT.inc()
-                        status.update(label="✅ Response generated!", state="complete")
+                        status.update(label="Done", state="complete")
 
                     except Exception as e:
                         logger.error(f"Error generating response: {e}")
-                        st.session_state.messages.append(("assistant", "❌ Sorry, I encountered an error. Please try again."))
-                        status.update(label="❌ Error occurred", state="error")
+                        st.session_state.messages.append(("assistant", "Sorry, I encountered an error. Please try again."))
+                        status.update(label="Error", state="error")
 
                 st.rerun()
 
@@ -1679,8 +1676,8 @@ else:
     # Footer
     st.markdown("---")
     st.markdown("""
-        <div style="text-align: center; color: rgba(255,255,255,0.5); padding: 2rem 0;">
-            <p>🤖 Powered by <strong>Krutrim AI</strong> | 🔒 Your privacy is protected</p>
-            <p style="font-size: 0.8rem;">Built with ❤️ using Streamlit | 📊 <a href="http://localhost:8000" style="color: #667eea;">Metrics Dashboard</a></p>
+        <div style="text-align: center; color: #333; padding: 1.5rem 0; font-size: 0.78rem;">
+            Powered by <strong style="color:#555;">Krutrim AI</strong> &nbsp;|&nbsp;
+            <a href="http://localhost:8000" style="color: #4a90d9; text-decoration: none;">Metrics</a>
         </div>
     """, unsafe_allow_html=True)
